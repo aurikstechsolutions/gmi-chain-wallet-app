@@ -1,0 +1,208 @@
+Create Virtual Card
+POST
+Issues a new virtual Mastercard. Funds are deducted from your wallet atomically. The card is provisioned instantly (usually < 30 seconds). If provisioning takes longer, you receive a pending reference instead.
+
+POST
+/api/external/cards/createcard
+Parameters
+
+Field	Type	Description
+api_key*	string	Your API key from Settings
+bin*	string	Card BIN (e.g. 539502, 525847, 537872, 533171, 246001)
+amount*	number	Initial balance in USD (min $10)
+name_on_card*	string	Cardholder name (min 2 chars)
+email	string	Cardholder email (optional, defaults to account email)
+dateOfBirth	string	Required only for US (537872) ,Singapore (533171) And UK (246001), format YYYY-MM-DD
+Request Body
+
+COPY{
+  "api_key": "d50079c767d2c4f4607bc8bcb3598ce2f6e37f7a",
+  "bin": "537872",
+  "amount": 20,
+  "name_on_card": "John Alex",
+  "email": "john@example.com",
+  "dateOfBirth": "1990-01-15"
+}
+Example Response
+
+COPY{
+  "success": true,
+  "message": "Card created successfully",
+  "card_id": "MR_A1B2C3D4E5F6G7H8",
+  "last_4": "4321",
+  "bin": "537872",
+  "amount": 20,
+  "fee": 1.80,
+  "total_charged": 21.80
+}
+Fund Virtual Card
+POST
+Adds funds to an existing card. A fixed $1.00 + 4% service fee is applied. Provide either card_id (preferred) or last4 digits.
+
+POST
+/api/external/cards/fundcard
+Parameters
+
+Field	Type	Description
+api_key*	string	Your API key
+card_id	string	Card ID returned from createcard (preferred)
+last4	string	Last 4 digits of the card (alternative to card_id)
+amount*	number	Amount to add in USD (min $10)
+Request Body
+
+COPY{
+  "api_key": "d50079c767d2c4f4607bc8bcb3598ce2f6e37f7a",
+  "card_id": "MR_A1B2C3D4E5F6G7H8",
+  "amount": 50
+}
+Example Response
+
+COPY{
+  "success": true,
+  "message": "Card funded successfully",
+  "data": {
+    "card_id": "MR_A1B2C3D4E5F6G7H8",
+    "amount": 50,
+    "fee": 3.00,
+    "total_debited": 53.00
+  }
+}
+Get Card Details
+POST
+Returns live card number, expiry, CVV, and current balance directly from the provider.
+
+POST
+/api/external/cards/carddetails
+Parameters
+
+Field	Type	Description
+api_key*	string	Your API key
+card_id	string	Card ID (preferred)
+last4	string	Last 4 digits (alternative)
+Request Body
+
+COPY{
+  "api_key": "d50079c767d2c4f4607bc8bcb3598ce2f6e37f7a",
+  "card_id": "MR_A1B2C3D4E5F6G7H8"
+}
+Example Response
+
+COPY{
+  "success": true,
+  "card_number": "5395020000001234",
+  "expiry": "12/27",
+  "cvv": "123",
+  "balance": 20.00,
+  "status": "active"
+}
+Freeze / Unfreeze Card
+POST
+Temporarily suspends or reactivates a virtual card.
+
+POST
+/api/external/premium/Freeze_Unfreeze
+Parameters
+
+Field	Type	Description
+api_key*	string	Your API key
+card_id*	string	Card ID to freeze/unfreeze
+action*	string	"freeze" or "unfreeze"
+Request Body
+
+COPY{
+  "api_key": "d50079c767d2c4f4607bc8bcb3598ce2f6e37f7a",
+  "card_id": "MR_A1B2C3D4E5F6G7H8",
+  "action": "freeze"
+}
+Example Response
+
+COPY{
+  "success": true,
+  "message": "Card freezed successfully"
+}
+List All Cards
+POST
+Returns all virtual cards under your account. Some card types do not include balance in this list — use Get Card Details to fetch the live balance for a specific card. Also accepts GET with api_key as query param.
+
+POST
+/api/external/cards/list
+Parameters
+
+Field	Type	Description
+api_key*	string	Your API key
+Request Body
+
+COPY{
+  "api_key": "d50079c767d2c4f4607bc8bcb3598ce2f6e37f7a"
+}
+Example Response
+
+COPY{
+  "success": true,
+  "total": 2,
+  "data": [
+    {
+      "card_id": "MR_A1B2C3D4E5F6G7H8",
+      "name_on_card": "John Alex",
+      "last4": "4321",
+      "card_brand": "MasterCard",
+      "card_type": "MasterCard",
+      "status": "active",
+      "balance": 18.50,
+      "created_at": "2026-04-10T14:23:00.000Z"
+    },
+    {
+      "card_id": "VC_X9Y8Z7W6",
+      "name_on_card": "John Alex",
+      "last4": "7890",
+      "card_brand": "Visa",
+      "card_type": "VIRTUAL",
+      "status": "active",
+      "balance": 42.00,
+      "created_at": "2026-03-22T09:11:00.000Z"
+    }
+  ]
+}
+Card Transactions & Balance
+POST
+Returns the live balance and full transaction history for a specific card, fetched directly from the upstream issuer.
+
+POST
+/api/external/cards/transactions
+Parameters
+
+Field	Type	Description
+api_key*	string	Your API key
+card_id*	string	Card ID from /cards/list or createcard
+Request Body
+
+COPY{
+  "api_key": "d50079c767d2c4f4607bc8bcb3598ce2f6e37f7a",
+  "card_id": "MR_A1B2C3D4E5F6G7H8"
+}
+Example Response
+
+COPY{
+  "success": true,
+  "data": {
+    "card_id": "MR_A1B2C3D4E5F6G7H8",
+    "balance": 18.50,
+    "total_transactions": 3,
+    "transactions": [
+      {
+        "date": "2026-04-12T10:44:00Z",
+        "type": "purchase",
+        "merchant": "Amazon.com",
+        "amount": 14.99,
+        "success": true
+      },
+      {
+        "date": "2026-04-11T18:02:00Z",
+        "type": "purchase",
+        "merchant": "Spotify",
+        "amount": 9.99,
+        "success": true
+      }
+    ]
+  }
+}

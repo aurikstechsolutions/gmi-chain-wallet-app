@@ -1,0 +1,96 @@
+Mobile Validator App — Epoch Checkpoint Update
+The Mchain coordination server has been updated with Phase 3: Epoch Checkpoint Finality. Mobile validator apps need to implement the following changes.
+
+What changed
+Every 100 blocks (~8.3 minutes), the server creates an epoch checkpoint that validators must sign to finalize. This is how the chain achieves BFT-style finality from mobile devices.
+
+New API endpoints
+Base URL: https://chain.mvault.pro (or https://node.mvault.pro)
+
+GET  /api/epochs                     → list recent epochs
+GET  /api/epochs/open                → get the current open epoch (needs signing)
+GET  /api/epochs/:epochNumber        → get a specific epoch
+POST /api/epochs/:epochNumber/sign   → submit your signature for an epoch
+
+GET /api/epochs/open response:
+
+{
+  "openEpoch": {
+    "id": 1,
+    "epochNumber": 114,
+    "blockHeight": 11400,
+    "blockHash": "0xabc123...",
+    "eligibleCount": 3,
+    "signatureCount": 1,
+    "quorumReached": false,
+    "signingWindowClosesAt": "2026-05-15T21:00:00Z",
+    "createdAt": "2026-05-15T20:35:00Z"
+  }
+}
+
+Returns { "openEpoch": null } if no epoch is currently open for signing.
+
+POST /api/epochs/:epochNumber/sign request body:
+
+{
+  "validatorAddress": "mxc1youraddress...",
+  "signature": "hex-encoded-secp256k1-signature"
+}
+
+Response: { "ok": true, "nowFinalized": false }
+
+How to sign an epoch
+Call GET /api/epochs/open to check if there is an open epoch
+If openEpoch is not null and signingWindowClosesAt is in the future:
+Take the blockHash from the response (hex string, may have 0x prefix)
+Strip 0x prefix, decode to raw bytes
+Compute SHA-256 of those raw bytes → this is the message to sign
+Sign with the validator's secp256k1 private key (stored in Secure Enclave / StrongBox)
+Encode the signature as lowercase hex
+POST to /api/epochs/:epochNumber/sign with your validatorAddress and signature
+Signing pseudocode:
+
+blockHashBytes = hex_decode(openEpoch.blockHash.replace("0x", ""))
+message        = sha256(blockHashBytes)
+signature      = secp256k1_sign(message, privateKey)   // DER or compact 64-byte
+signatureHex   = hex_encode(signature)
+
+Heartbeat shortcut (recommended)
+You can also submit an epoch signature inline with the heartbeat — this saves a round trip:
+
+POST /api/validators/heartbeat
+
+{
+  "address": "mxc1youraddress...",
+  "batteryLevel": 87,
+  "isCharging": false,
+  "activeMinutes": 58,
+  "epochSignature": {
+    "epochNumber": 114,
+    "signature": "hex-encoded-signature"
+  }
+}
+
+The server will process the epoch signature alongside the heartbeat. The heartbeat response will include the current open epoch so you always know what to sign next:
+
+{
+  "ok": true,
+  "blockHeight": 11449,
+  "openEpoch": { ... }
+}
+
+Recommended flow
+Every 60 seconds (heartbeat loop):
+  1. Check openEpoch from last heartbeat response (or call /api/epochs/open)
+  2. If openEpoch exists AND not yet signed by this validator AND window not expired:
+       → sign the blockHash (SHA-256 → secp256k1)
+       → include epochSignature in next heartbeat POST
+  3. POST heartbeat (with optional epochSignature)
+  4. Store openEpoch from response for next cycle
+
+Key details
+Signing key: the same secp256k1 key pair registered at /api/validators/register (public key stored on server)
+Message format: SHA-256(hex_decode(blockHash)) — NOT the raw blockHash string
+Signing window: 25 minutes per epoch — if window closes, skip and wait for next epoch
+Quorum: 51% of eligible validators must sign within the window for the epoch to finalize
+Eligible validators: must have sent a heartbeat within the past 15 minutes at epoch creation time

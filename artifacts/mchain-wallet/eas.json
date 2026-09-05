@@ -1,0 +1,48 @@
+{
+  "cli": {
+    "version": ">= 16.0.0",
+    "appVersionSource": "local"
+  },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk",
+        "gradleCommand": ":app:assembleDebug"
+      },
+      "channel": "development",
+      "cache": { "key": "mchain-dev-v2" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://wallet.mymchain.com",
+        "EXPO_PUBLIC_WALLET_KEY": "9009b20d0b76731aefd134431290f1d9f7c4a0bce2a56884168f97fc654ae6c1"
+      }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": {
+        "buildType": "apk"
+      },
+      "channel": "preview",
+      "cache": { "key": "mchain-preview-v2" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://wallet.mymchain.com",
+        "EXPO_PUBLIC_WALLET_KEY": "9009b20d0b76731aefd134431290f1d9f7c4a0bce2a56884168f97fc654ae6c1"
+      }
+    },
+    "production": {
+      "android": {
+        "buildType": "app-bundle"
+      },
+      "channel": "production",
+      "cache": { "key": "mchain-prod-v2" },
+      "env": {
+        "EXPO_PUBLIC_API_URL": "https://wallet.mymchain.com",
+        "EXPO_PUBLIC_WALLET_KEY": "9009b20d0b76731aefd134431290f1d9f7c4a0bce2a56884168f97fc654ae6c1"
+      }
+    }
+  },
+  "submit": {
+    "production": {}
+  }
+}

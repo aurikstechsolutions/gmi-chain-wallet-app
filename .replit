@@ -1,0 +1,118 @@
+modules = ["nodejs-20", "web", "bash", "postgresql-16", "python-base-3.13"]
+
+[deployment]
+router = "application"
+deploymentTarget = "autoscale"
+
+[deployment.postBuild]
+args = ["pnpm", "store", "prune"]
+env = { "CI" = "true" }
+
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "API Server"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "Admin Panel"
+
+[[workflows.workflow]]
+name = "API Server"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "console"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "redis-server --daemonize yes --port 6379 --loglevel warning 2>/dev/null; PORT=8080 pnpm --filter @workspace/api-server run dev"
+waitForPort = 8080
+
+[[workflows.workflow]]
+name = "Admin Panel"
+author = "agent"
+
+[workflows.workflow.metadata]
+outputType = "webview"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "PORT=5000 BASE_PATH=/ pnpm --filter @workspace/admin-panel run dev"
+waitForPort = 5000
+
+[agent]
+stack = "BEST_EFFORT_FALLBACK"
+expertMode = true
+integrations = ["github:1.0.0"]
+
+[postMerge]
+path = "scripts/post-merge.sh"
+timeoutMs = 20000
+
+[[ports]]
+localPort = 3000
+externalPort = 3002
+
+[[ports]]
+localPort = 3001
+externalPort = 3003
+
+[[ports]]
+localPort = 5000
+externalPort = 80
+
+[[ports]]
+localPort = 6379
+externalPort = 5000
+
+[[ports]]
+localPort = 8080
+externalPort = 8080
+
+[[ports]]
+localPort = 8081
+externalPort = 8081
+
+[[ports]]
+localPort = 19144
+externalPort = 3000
+
+[[ports]]
+localPort = 20130
+externalPort = 3001
+
+[[ports]]
+localPort = 20131
+externalPort = 4200
+
+[nix]
+channel = "stable-25_05"
+
+[userenv]
+
+[userenv.shared]
+GMI_BRIDGE_BSC_LOCKBOX_ADDRESS = "0xaabba3fc7230be887f02ed610641674144f638d2"
+GMI_BRIDGE_BSC_RPC_URL = "https://1rpc.io/bnb"
+GMI_BRIDGE_BSC_TOKEN_ADDRESS = "0x55d398326f99059fF775485246999027B3197955"
+GMI_BRIDGE_BSC_TOKEN_DECIMALS = "18"
+GMI_BRIDGE_CONFIRMATIONS = "3"
+GMI_BRIDGE_FEE_BPS = "0"
+GMI_BRIDGE_GMI_MINTER_ADDRESS = "0x02b5295b9593d1e62cd18cab865ab74359a964bd"
+GMI_BRIDGE_GMI_RPC_URL = "https://rpc.gmichain.in"
+GMI_BRIDGE_GMI_TOKEN_ADDRESS = "0x7b2ed1be97fa240dbd0328dd307e35e588bcb917"
+GMI_BRIDGE_GMI_TOKEN_DECIMALS = "18"
+GMI_BRIDGE_MIN_AMOUNT = "0"
+GMI_AMM_FACTORY_ADDRESS = "0x1B0681D823ecEd8E0Cfc03202Ba9C80565f62Bfb"
+GMI_AMM_FEE_BPS = "30"
+GMI_AMM_ROUTER_ADDRESS = "0x5FaF5d209620e5a1e0D0Db77BB522e043dc8Ef07"
+GMI_AMM_WRAPPED_NATIVE_ADDRESS = "0x9277e01ca987Ab34c9124760E750eb3b662174a8"
+GMI_AMM_WUSDT_ADDRESS = "0x7B2ED1be97fA240dBd0328dD307E35e588bCB917"
+GMI_AMM_WUSDT_WGMI_PAIR_ADDRESS = "0x1AD8bB5545A497396361101E25be6b0606Df6Be7"

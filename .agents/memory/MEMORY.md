@@ -1,0 +1,9 @@
+- [DApp RPC proxy](dapp-rpc-proxy.md) — All WebView ethereum.request() proxied through RN fetch; fixes "Could not coalesce error" + MChain gas/miner quirks.
+- [Replit dependency firewall](dependency-firewall.md) — Imported pnpm workspaces may need narrow overrides for blocked transitive tarballs before dependencies can install.
+- [Expo static build ports](expo-static-build.md) — Static Expo exports need a configurable Metro port when the mockup preview already owns 8081.
+- [Neutral network language](neutral-network-language.md) — Keep protocol/storage validator identifiers internal while using Network and Node language throughout the product UI.
+- [Bridge RPC compatibility](bridge-rpc-compatibility.md) — Compile GMI contracts for Paris EVM and keep BSC eth_getLogs polling chunks below public RPC limits.
+- [Bridge premint policy](bridge-premint-policy.md) — The current GMI wUSDT supply includes an intentionally unbacked premint and must not be treated as BSC liquidity.
+- [AMM contract notes](amm-contract-notes.md) — OpenZeppelin ERC20 v5 requires a non-zero holder for permanently locked minimum LP.
+- [GitHub publish pack repair](github-publish-pack-repair.md) — A fresh no-delta snapshot can recover GitHub pushes rejected for a missing expected object despite clean local fsck.
+- [Solana wallet derivation](solana-wallet-derivation.md) — Derive each Solana Ed25519 account from the wallet’s existing 32-byte secret; NFC entries persist only the public address.

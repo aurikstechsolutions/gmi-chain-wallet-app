@@ -1,0 +1,536 @@
+MChain Wallet Integration Guide
+Base URL: https://node.mymchain.com
+All wallet API endpoints are prefixed with /api.
+
+Authentication
+All write operations require the Wallet API Key in every request header:
+
+X-Wallet-Key: <your-wallet-api-key>
+
+Obtain this key from the admin panel → Settings → Wallet App API Key → Generate / Rotate.
+Read-only GET endpoints (balance, history, validators list, blocks) do not require this header.
+
+Endpoints that require X-Wallet-Key:
+
+Method	Path	Description
+POST	/api/transactions	Send MC
+POST	/api/validators/register	Register as validator
+POST	/api/validators/heartbeat	Submit uptime heartbeat
+POST	/api/validators/pause	Pause validator
+POST	/api/validators/restart	Resume validator
+POST	/api/validators/:address/claim-rewards	Move available rewards to wallet
+POST	/api/names/register	Register a .mxc name
+Missing or invalid key returns 401 { "error": "Unauthorized" }.
+
+Address Formats
+MChain uses two interchangeable address formats:
+
+Format	Example	Notes
+MxC (bech32)	mxc1qpzry9x8gf2tvdw0s3jn54khce6mua7l…	Primary format, human-readable
+Ethereum (hex)	0x1234…abcd	Internally used, EVM-compatible
+All endpoints accept either format — they are auto-normalised on the server.
+
+1. Account
+Get account balance & info
+GET /api/accounts/:address
+
+:address — MxC or 0x address.
+
+Response
+
+{
+  "address": "mxc1…",
+  "ethAddress": "0x…",
+  "balance": "5000000000000000000",   // wei string — spendable MC
+  "balanceMc": "5.0",                  // human MC
+  "nonce": 3,
+  "exists": true,
+  "names": ["alice.mxc"],
+  "recentTransactions": [ /* last 20 txs */ ]
+}
+
+If the account has never received funds, exists is false and balances are "0".
+
+Create / register account
+POST /api/accounts/create
+Content-Type: application/json
+{ "ethAddress": "0x…" }
+
+Omit ethAddress to let the server generate a fresh keypair.
+
+Response (generated keypair)
+
+{
+  "message": "Generated new keypair (store private key securely)",
+  "address": "mxc1…",
+  "ethAddress": "0x…",
+  "privateKey": "0x…"   // shown ONCE — save immediately
+}
+
+Response (existing ethAddress)
+
+{ "address": "mxc1…", "ethAddress": "0x…", "balance": "0", "created": true }
+
+2. Send a Transaction
+POST /api/transactions
+X-Wallet-Key: <key>
+Content-Type: application/json
+
+Request body
+
+{
+  "from": "mxc1… or 0x…",   // sender address
+  "to":   "mxc1… or 0x…",   // recipient address
+  "amount": "1000000000000000000",  // wei string (must be > 0)
+  "nonce": 3,                 // optional; defaults to account nonce
+  "signature": "0x…",        // required — see Signing below
+  "data": "memo text",        // optional
+  "txType": "transfer"        // optional; default "transfer"
+}
+
+Signing a transaction
+Build the canonical message exactly as shown, then sign it with eth_sign / personal_sign:
+
+MChain Transfer
+from: <from>
+to: <to>
+amount: <amount>
+nonce: <nonce>
+
+Example (ethers.js):
+
+import { ethers } from "ethers";
+const wallet = new ethers.Wallet(privateKey);
+const nonce  = 3;
+const msg    = `MChain Transfer\nfrom: ${from}\nto: ${to}\namount: ${amount}\nnonce: ${nonce}`;
+const sig    = await wallet.signMessage(msg);   // produces 0x… EIP-191 signature
+
+Response
+
+{ "txHash": "0x…", "status": "confirmed" }
+
+Error codes
+
+HTTP	Reason
+400	Nonce mismatch, invalid address, zero amount
+401	Signature does not match from address
+402	Insufficient balance (includes gas fee)
+429	Rate limit exceeded
+3. Transaction History
+List transactions (filtered)
+GET /api/transactions?address=<addr>&limit=20&status=confirmed
+
+Query param	Type	Default	Description
+address	string	—	Filter by sender or recipient (MxC or 0x)
+limit	number	20	Max rows (capped at 100)
+status	string	—	confirmed, pending, failed
+blockHeight	number	—	All txs in a specific block
+Response
+
+{
+  "transactions": [
+    {
+      "hash": "0x…",
+      "fromAddress": "mxc1…",
+      "toAddress": "mxc1…",
+      "amount": "1000000000000000000",
+      "txType": "transfer",
+      "status": "confirmed",
+      "createdAt": "2026-06-03T12:00:00.000Z"
+    }
+  ],
+  "total": 42
+}
+
+Transaction types you may see in history:
+
+txType	Description
+transfer	Standard MC transfer between wallets
+gas_reward	Block proposer fee share (system, no sender debit)
+reward_claim	Validator claiming their unlocked rewards
+reward	Legacy treasury reward payout
+contract_call	EVM smart contract interaction
+Get single transaction
+GET /api/transactions/:hash
+
+4. Blocks
+Latest blocks
+GET /api/blocks?limit=20
+
+Latest block
+GET /api/blocks/latest
+
+Single block (by height or hash)
+GET /api/blocks/:identifier
+
+:identifier can be a block height (number) or block hash (0x…).
+
+Response
+
+{
+  "height": 100234,
+  "hash": "0x…",
+  "parentHash": "0x…",
+  "proposerAddress": "mxc1…",
+  "timestamp": "2026-06-03T12:00:00.000Z",
+  "txCount": 2
+}
+
+5. Validators
+List active validators
+GET /api/validators?status=active&limit=100
+
+status values: active, pending, paused, inactive, banned, all.
+
+Get single validator
+GET /api/validators/:address
+
+Response (key fields)
+
+{
+  "address": "mxc1…",
+  "ethAddress": "0x…",
+  "moniker": "MyNode",
+  "status": "active",
+  "packageTier": "130",
+  "frozenBalance": "120000000000000000000",    // locked, not yet claimable (wei)
+  "availableBalance": "30000000000000000000",  // unlocked, ready to claim (wei)
+  "totalActiveMinutes": 14400,
+  "lastSeenAt": "2026-06-03T11:58:00.000Z"
+}
+
+Register as a validator
+POST /api/validators/register
+X-Wallet-Key: <key>
+Content-Type: application/json
+
+Request body
+
+{
+  "address":        "mxc1…",           // required — your MxC address
+  "ethAddress":     "0x…",             // required — your Ethereum address
+  "publicKey":      "04abcd…",         // required — uncompressed secp256k1 hex
+  "deviceId":       "UUID",            // optional — unique device identifier
+  "moniker":        "MyNode",          // optional — display name (≤ 64 chars)
+  "commissionRate": "10"               // optional — delegation commission % (default 10)
+}
+
+Registration requires the ethAddress to be activated on the MChain smart contract ($55 or $130 package). Returns 403 if not activated.
+
+Response
+
+{ "validator": { "address": "mxc1…", "status": "pending", … } }
+
+Status starts as pending until approved by the admin.
+
+6. Heartbeat (Validator Uptime)
+Send a heartbeat every 8 minutes (±2 min tolerance). Sending too early returns 429 too_soon.
+
+POST /api/validators/heartbeat
+X-Wallet-Key: <key>
+Content-Type: application/json
+
+Request body
+
+{
+  "address":         "mxc1…",          // required
+  "deviceSignature": "0x…",            // optional — signs device ID
+  "batteryLevel":    85,               // optional — 0-100
+  "isCharging":      true,             // optional
+  "epochSignature":  {                 // optional — include to sign current epoch
+    "epochNumber": 42,
+    "signature":   "0x…"
+  }
+}
+
+Response
+
+{
+  "ok": true,
+  "blockHeight": 100234,
+  "timestamp": "2026-06-03T12:00:00.000Z",
+  "isStaked": true,
+  "sessionExpiresAt": null,
+  "openEpoch": {
+    "epochNumber": 42,
+    "startsAt": "2026-06-03T12:00:00.000Z",
+    "endsAt": "2026-06-04T12:00:00.000Z",
+    "signerCount": 17
+  },
+  "epochResult": null
+}
+
+Error codes
+
+HTTP	Body error	Meaning
+403	validator_paused	Call POST /api/validators/restart first
+403	not_activated	Purchase activation package
+429	too_soon	Wait retryAfterSeconds before next heartbeat
+7. Pause & Restart a Validator
+Pause (stop earning rewards temporarily)
+POST /api/validators/pause
+X-Wallet-Key: <key>
+Content-Type: application/json
+{ "address": "mxc1…" }
+
+Restart (resume earning rewards)
+POST /api/validators/restart
+X-Wallet-Key: <key>
+Content-Type: application/json
+{ "address": "mxc1…" }
+
+8. Validator Earnings & Balances
+How the reward lifecycle works
+1. Hourly distribution (automatic)
+   → frozenBalance increases (MC is locked)
+2. Admin releases rewards (when referral conditions met)
+   → frozenBalance decreases, availableBalance increases
+3. Validator claims (wallet app calls claim-rewards)
+   → availableBalance resets to 0
+   → accountsTable.balance (spendable wallet) increases
+   → synced to all 3 nodes within the next block (~seconds)
+
+The spendable wallet balance (GET /api/accounts/:address → balance) and the reward tracking fields (frozenBalance, availableBalance on the validator record) are separate. MC only enters the spendable wallet after a successful claim.
+
+Claim available rewards
+POST /api/validators/:address/claim-rewards
+X-Wallet-Key: <key>
+
+No request body needed.
+
+Response (rewards claimed)
+
+{
+  "ok": true,
+  "txHash": "0x…",
+  "claimed": "30.5",                       // human-readable MC
+  "claimedWei": "30500000000000000000"     // wei string
+}
+
+Response (nothing to claim)
+
+{
+  "ok": true,
+  "claimed": "0",
+  "claimedWei": "0",
+  "message": "No available rewards to claim"
+}
+
+After a successful claim:
+
+The validator's spendable balance (GET /api/accounts/:address) increases immediately on the primary node.
+The reward_claim transaction is included in the next block broadcast and credited on all 3 nodes within a few seconds.
+The availableBalance field on the validator record resets to "0".
+Earnings summary
+GET /api/validators/:address/earnings
+
+{
+  "totalEarnedMc": "150.5",
+  "totalEarnedWei": "150500000000000000000",
+  "totalPeriods": 30,
+  "lastPeriod": "2026-06-02",
+  "frozenBalanceMc": "120.0",
+  "availableBalanceMc": "30.5"
+}
+
+Gas rewards
+GET /api/validators/:address/gas-rewards
+
+Treasury rewards (hourly / epoch payouts)
+GET /api/validators/:address/treasury-rewards
+
+Recent blocks proposed
+GET /api/validators/:address/blocks
+
+Epoch participation history
+GET /api/validators/:address/epochs
+
+9. Sub-Wallets
+List sub-wallets for a validator
+GET /api/validators/:address/sub-wallets
+
+{
+  "validatorAddress": "mxc1…",
+  "subWallets": [
+    {
+      "subWalletAddress": "mxc1…",
+      "subWalletEthAddress": "0x…",
+      "packageTier": "55",
+      "label": "Phone 2",
+      "frozenBalance": "5000000000000000000",
+      "availableBalance": "1000000000000000000",
+      "createdAt": "2026-06-01T10:00:00.000Z"
+    }
+  ],
+  "total": 1
+}
+
+10. Epoch Signing
+Validators must co-sign epoch checkpoints to earn epoch rewards. The open epoch is returned in every heartbeat response (openEpoch).
+
+Sign an epoch
+POST /api/epochs/:epochNumber/sign
+Content-Type: application/json
+{
+  "validatorAddress": "mxc1…",
+  "signature": "0x…"
+}
+
+Build the epoch signature message:
+
+MChain Epoch
+epochNumber: <N>
+validator: <mxc1…>
+
+Sign with eth_sign / personal_sign using the validator's private key (same pattern as transactions).
+
+Response
+
+{ "ok": true, "nowFinalized": false }
+
+List recent epochs
+GET /api/epochs?limit=10
+
+Get epoch details
+GET /api/epochs/:epochNumber
+
+11. .mxc Name Registry
+Resolve a name → address
+GET /api/names/resolve/:name
+
+:name can be alice or alice.mxc.
+
+Response
+
+{
+  "name": "alice.mxc",
+  "address": "mxc1…",
+  "owner": "mxc1…",
+  "avatar": "https://…",
+  "bio": "Hello MChain",
+  "registeredAt": "2026-05-01T00:00:00.000Z"
+}
+
+Lookup names owned by an address
+GET /api/names/lookup/:address
+
+Check name availability
+GET /api/names/available/:name
+
+{ "name": "alice.mxc", "available": true, "reason": null }
+
+Search names
+GET /api/names/search?q=ali
+
+Register a name
+POST /api/names/register
+X-Wallet-Key: <key>
+Content-Type: application/json
+{
+  "name":            "alice",       // required — 3-63 lowercase alphanumeric + hyphens
+  "ownerAddress":    "mxc1…",       // required
+  "resolverAddress": "mxc1…",       // optional — defaults to ownerAddress
+  "avatar":          "https://…",   // optional
+  "bio":             "Hello!",      // optional
+  "isSoulbound":     false          // optional — if true, name cannot be transferred
+}
+
+Response
+
+{ "name": { … }, "txHash": "0x…" }
+
+Node Architecture — What's On Each Node
+MChain runs a 3-node cluster (Primary VPS3, Standby VPS2, Follower VPS1).
+
+Data	All 3 nodes	Primary only (VPS3)
+Block headers	✅	—
+Transactions (transfers, contract calls)	✅	—
+Gas reward txs (gas_reward)	✅ synced in block broadcast	—
+Reward claim txs (reward_claim)	✅ synced in block broadcast	—
+Account spendable balance	✅ synced via P2P	—
+Validator frozenBalance / availableBalance	—	✅
+Reward history (/earnings, /treasury-rewards)	—	✅
+Gas reward records (/gas-rewards)	—	✅
+Sub-wallet frozen / available balances	—	✅
+Heartbeat records	—	✅
+Rule of thumb for the wallet app:
+
+Spendable balance (GET /api/accounts/:address) — any node is fine; all 3 stay in sync.
+Claim rewards (POST /api/validators/:address/claim-rewards) — send to the primary node; the resulting credit syncs to all 3 nodes automatically within the next block.
+Validator rewards, frozenBalance, earnings history — always query the primary node (https://node.mymchain.com), which routes to VPS3.
+Write operations (send tx, heartbeat, register) — always send to the primary node.
+The primary node URL https://node.mymchain.com already routes to VPS3. Do not hardcode standby/follower IPs directly.
+
+Common Error Shape
+All errors return JSON:
+
+{ "error": "Human-readable message" }
+
+HTTP	Meaning
+400	Bad request / validation failed
+401	Missing or invalid X-Wallet-Key
+403	Forbidden (banned, not activated, wrong status)
+404	Resource not found
+409	Conflict (already registered, name taken)
+429	Rate limited — respect retryAfterSeconds in body
+503	Node not ready
+Units & Precision
+All amounts are wei strings (1 MC = 10¹⁸ wei).
+Human-readable …Mc fields are for display only — always use wei for calculations.
+Total supply: 24,000,000 MC = "24000000000000000000000000" wei.
+Rate Limits
+Endpoint group	Limit
+General API	200 req / 15 min per IP
+POST /api/validators/register	10 req / hour per IP
+POST /api/validators/heartbeat	20 req / 15 min per IP
+POST /api/transactions	50 req / 15 min per IP
+POST /api/epochs/:n/sign	30 req / 5 min per IP
+SDK Quick-Start (TypeScript)
+const NODE = "https://node.mymchain.com";
+const WALLET_KEY = "<your-wallet-api-key>";
+async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(`${NODE}/api${path}`, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      "X-Wallet-Key": WALLET_KEY,
+      ...(init?.headers ?? {}),
+    },
+  });
+  if (!res.ok) throw new Error((await res.json() as { error: string }).error);
+  return res.json() as Promise<T>;
+}
+// ── Get spendable balance ──────────────────────────────────────────────────
+const account = await apiFetch<{ balanceMc: string; nonce: number; address: string }>(
+  `/accounts/${address}`
+);
+console.log("Balance:", account.balanceMc, "MC");
+// ── Send MC ───────────────────────────────────────────────────────────────
+import { ethers } from "ethers";
+const wallet = new ethers.Wallet(privateKey);
+const nonce  = account.nonce;
+const from   = account.address;
+const to     = "mxc1…recipient";
+const amount = ethers.parseEther("1.5").toString();  // 1.5 MC in wei
+const msg    = `MChain Transfer\nfrom: ${from}\nto: ${to}\namount: ${amount}\nnonce: ${nonce}`;
+const sig    = await wallet.signMessage(msg);
+const tx     = await apiFetch<{ txHash: string }>("/transactions", {
+  method: "POST",
+  body: JSON.stringify({ from, to, amount, nonce, signature: sig }),
+});
+console.log("TX:", tx.txHash);
+// ── Check validator rewards ────────────────────────────────────────────────
+const validator = await apiFetch<{
+  frozenBalance: string;
+  availableBalance: string;
+}>(`/validators/${address}`);
+const available = BigInt(validator.availableBalance);
+if (available > 0n) {
+  // ── Claim available rewards ──────────────────────────────────────────────
+  const claim = await apiFetch<{ ok: boolean; claimed: string; txHash: string }>(
+    `/validators/${address}/claim-rewards`,
+    { method: "POST" }
+  );
+  console.log(`Claimed ${claim.claimed} MC → TX: ${claim.txHash}`);
+  // Spendable balance updates on all 3 nodes within the next block (~seconds)
+}
