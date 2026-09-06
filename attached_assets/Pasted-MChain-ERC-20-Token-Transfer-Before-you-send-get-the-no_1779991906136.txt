@@ -1,0 +1,60 @@
+MChain — ERC-20 Token Transfer
+Before you send: get the nonce
+GET /api/accounts/{senderAddress}
+
+{ "account": { "nonce": 5 } }
+
+Build the data field (calldata)
+import { ethers } from "ethers";
+const iface = new ethers.Interface(["function transfer(address to, uint256 amount)"]);
+const data = iface.encodeFunctionData("transfer", [
+  "0xRecipientAddress",          // who receives the tokens
+  ethers.parseUnits("10", 18),   // how many tokens (adjust decimals to match the token)
+]);
+// → "0xa9059cbb0000000000000000..."
+
+Build and sign the message
+const from   = "mxc1YourAddress...";      // sender
+const to     = "mxc1TokenContract...";    // TOKEN CONTRACT address (not the recipient)
+const amount = "0";                        // always "0" — you're sending zero native MC
+const nonce  = 5;                          // from GET /api/accounts above
+const message = `MChain Transfer\nfrom: ${from}\nto: ${to}\namount: ${amount}\nnonce: ${nonce}`;
+const signature = await wallet.signMessage(message);
+
+Submit
+POST /api/transactions
+Content-Type: application/json
+
+{
+  "from":      "mxc1YourAddress...",
+  "to":        "mxc1TokenContractAddress...",
+  "amount":    "0",
+  "nonce":     5,
+  "txType":    "contract_call",
+  "data":      "0xa9059cbb...",
+  "signature": "0x..."
+}
+
+Required fields — none can be missing or wrong:
+Field	Value
+from	Sender address (mxc1 or 0x)
+to	Token contract address — NOT the recipient
+amount	"0" (string, not number)
+nonce	Integer from /api/accounts
+txType	"contract_call" — mandatory, causes the error if missing
+data	ABI-encoded transfer(recipient, tokenAmount)
+signature	personal_sign of the message above
+Success response
+{
+  "txHash": "0x...",
+  "transaction": {
+    "txType":        "contract_call",
+    "from":          "mxc1YourAddress...",
+    "to":            "mxc1RecipientAddress...",
+    "tokenContract": "mxc1TokenContractAddress...",
+    "tokenAmount":   "10000000000000000000",
+    "amount":        "0"
+  }
+}
+
+The server automatically decodes the calldata — to in the response shows the actual token recipient, and tokenContract shows the contract used.

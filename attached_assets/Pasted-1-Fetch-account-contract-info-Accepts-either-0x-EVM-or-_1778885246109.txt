@@ -1,0 +1,92 @@
+1. Fetch account/contract info
+Accepts either 0x... (EVM) or mxc1... (MxC bech32) address.
+
+GET /api/accounts/{address}
+
+Response:
+
+{
+  "address": "mxc1qld000dq4t4g36gss7dje4hvnmxusu3cddy3qw",
+  "ethAddress": "0x07daf7bda0aaea88e910879b2cd6ec9ecdc87238",
+  "balance": "5000000000000000000",
+  "balanceMc": "5.0",
+  "nonce": 1,
+  "isContract": true,
+  "exists": true,
+  "names": [],
+  "recentTransactions": [ ... ]
+}
+
+2. Read contract token metadata (eth_call)
+Endpoint:
+
+POST /api/rpc
+Content-Type: application/json
+
+Call name():
+
+{
+  "jsonrpc": "2.0",
+  "id": 1,
+  "method": "eth_call",
+  "params": [
+    { "to": "0x07daf7bda0aaea88e910879b2cd6ec9ecdc87238", "data": "0x06fdde03" },
+    "latest"
+  ]
+}
+
+Call symbol():
+
+{ "data": "0x95d89b41" }
+
+Call decimals():
+
+{ "data": "0x313ce567" }
+
+Call totalSupply():
+
+{ "data": "0x18160ddd" }
+
+Call balanceOf(address) — pass the wallet address ABI-encoded as 32 bytes:
+
+{
+  "data": "0x70a08231000000000000000000000000{24-zero-padded-eth-address-without-0x}"
+}
+
+Example for 0xabc123...:
+
+0x70a08231000000000000000000000000000000000000000000000000000000000abc123...
+
+3. Decode the responses
+All eth_call results come back as raw ABI-encoded hex:
+
+Function	Return type	How to decode
+name()	string	Dynamic: bytes 64–128 = length, then UTF-8 data
+symbol()	string	Same as name
+decimals()	uint8	Last 2 hex chars of the 32-byte result
+totalSupply()	uint256	Full 32-byte value as BigInt
+balanceOf()	uint256	Full 32-byte value as BigInt
+Quick decode examples (JavaScript/Dart):
+
+// uint256
+const totalSupply = BigInt("0x" + result.slice(2))
+// decimals (uint8)
+const decimals = parseInt(result.slice(-2), 16)
+// string (name/symbol)
+function decodeString(hex) {
+  const raw = hex.slice(2)                        // strip 0x
+  const len = parseInt(raw.slice(64, 128), 16)    // 2nd 32-byte word = length
+  const bytes = raw.slice(128, 128 + len * 2)     // actual UTF-8 bytes
+  return Buffer.from(bytes, "hex").toString("utf8")
+  // Dart: utf8.decode(hexToBytes(bytes))
+}
+// balanceOf — format with decimals
+const balance = BigInt("0x" + result.slice(2))
+const formatted = Number(balance) / 10 ** decimals
+
+Suggested flow in the app
+User pastes address → validate format (starts with 0x or mxc1)
+GET /api/accounts/{address} → get MC balance + check isContract
+If isContract: true → fire 4 parallel POST /api/rpc calls for name, symbol, decimals, totalSupply
+Optionally call balanceOf(userWalletAddress) to show the user's token balance
+Display: token name/symbol, total supply, user's token balance, MC balance, recent transactions

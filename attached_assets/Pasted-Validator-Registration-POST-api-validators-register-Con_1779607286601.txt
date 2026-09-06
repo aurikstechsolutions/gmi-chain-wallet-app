@@ -1,0 +1,270 @@
+Validator Registration
+POST /api/validators/register
+Content-Type: application/json
+
+{
+  "address":    "mxc1...",
+  "ethAddress": "0x...",
+  "publicKey":  "04abcd...",
+  "moniker":    "My Node",
+  "deviceId":   "device-uuid"
+}
+
+Success (201):
+
+{
+  "validator": {
+    "address": "mxc1...",
+    "ethAddress": "0x...",
+    "status": "pending",
+    "packageTier": "130",
+    "frozenBalance": "0",
+    "availableBalance": "0"
+  }
+}
+
+Error — not activated (403):
+
+{
+  "error": "Account not activated",
+  "message": "You must purchase a $55 or $130 package to apply as a validator.",
+  "isActive": false
+}
+
+Note: Registration requires the main validator wallet to already be activated on the smart contract. Sub-wallets do not have this requirement — see Section 4.
+
+2. Heartbeat (keeps validator active + triggers sub-wallet auto-verify)
+POST /api/validators/heartbeat
+Content-Type: application/json
+
+{
+  "address":        "mxc1...",
+  "batteryLevel":   85,
+  "isCharging":     false,
+  "epochSignature": {
+    "epochNumber": 42,
+    "signature":   "abcdef..."
+  }
+}
+
+Success:
+
+{
+  "ok": true,
+  "blockHeight": 4200,
+  "timestamp": "2026-05-24T10:00:00.000Z",
+  "openEpoch": {
+    "epochNumber": 43,
+    "blockHeight": 4300,
+    "blockHash": "0xabc...",
+    "signingWindowClosesAt": "2026-05-24T10:25:00.000Z"
+  },
+  "epochResult": { "ok": true, "nowFinalized": false }
+}
+
+Auto-Verify: Every heartbeat automatically re-checks any sub-wallets that have packageTier: null (not yet verified) against the smart contract. As soon as a sub-wallet gets activated on-chain, its packageTier is updated on the next heartbeat — no extra call needed from the app.
+
+3. Pause / Restart Validator
+POST /api/validators/pause
+POST /api/validators/restart
+Content-Type: application/json
+{ "address": "mxc1..." }
+
+4. Sub-Wallet Management
+Add sub-wallet (works even if not yet activated)
+POST /api/validators/{validatorAddress}/sub-wallets
+Content-Type: application/json
+
+{
+  "subWalletAddress": "mxc1... or 0x...",
+  "label": "Trading wallet"
+}
+
+Success — activated sub-wallet (201):
+
+{
+  "ok": true,
+  "subWallet": {
+    "id": 1,
+    "validatorAddress": "mxc1...",
+    "subWalletAddress": "mxc1...",
+    "subWalletEthAddress": "0x...",
+    "packageTier": "130",
+    "frozenBalance": "0",
+    "availableBalance": "0",
+    "label": "Trading wallet",
+    "createdAt": "2026-05-24T10:00:00.000Z"
+  }
+}
+
+Success — not yet activated sub-wallet (201):
+
+{
+  "ok": true,
+  "subWallet": {
+    "id": 2,
+    "validatorAddress": "mxc1...",
+    "subWalletAddress": "mxc1...",
+    "subWalletEthAddress": "0x...",
+    "packageTier": null,
+    "frozenBalance": "0",
+    "availableBalance": "0",
+    "label": "Savings wallet",
+    "createdAt": "2026-05-24T10:00:00.000Z"
+  }
+}
+
+When packageTier is null, the sub-wallet is registered but will not earn epoch rewards yet. The system automatically checks the contract on every validator heartbeat. Once the sub-wallet buys a package on-chain, the next heartbeat will set packageTier to "55" or "130" and it starts earning from that point.
+
+Wallet app should:
+
+Show a "Pending activation" badge when packageTier === null
+No polling needed — just re-fetch the sub-wallet list after each heartbeat response
+List sub-wallets
+GET /api/validators/{validatorAddress}/sub-wallets
+
+{
+  "validatorAddress": "mxc1...",
+  "subWallets": [
+    {
+      "id": 1,
+      "subWalletAddress": "mxc1...",
+      "subWalletEthAddress": "0x...",
+      "packageTier": "130",
+      "frozenBalance": "12000000000000000000",
+      "availableBalance": "0",
+      "label": "Trading wallet",
+      "createdAt": "2026-05-24T10:00:00.000Z"
+    },
+    {
+      "id": 2,
+      "subWalletAddress": "mxc1...",
+      "subWalletEthAddress": "0x...",
+      "packageTier": null,
+      "frozenBalance": "0",
+      "availableBalance": "0",
+      "label": "Savings wallet",
+      "createdAt": "2026-05-24T10:00:00.000Z"
+    }
+  ],
+  "total": 2
+}
+
+Remove sub-wallet
+DELETE /api/validators/{validatorAddress}/sub-wallets
+Content-Type: application/json
+{ "subWalletAddress": "mxc1... or 0x..." }
+
+Max 10 sub-wallets per validator.
+
+5. Sub-Wallet Lifecycle
+1. Add sub-wallet (any address)
+   └─ packageTier: null  →  shown as "Pending activation"
+2. User buys $55 or $130 package on-chain with that wallet
+3. Next validator heartbeat fires
+   └─ server checks contract automatically
+   └─ packageTier updated to "55" or "130"
+4. Sub-wallet now earns epoch rewards (deposited to its frozenBalance)
+
+The wallet app only needs to:
+
+Call GET /api/validators/{addr}/sub-wallets after each heartbeat response
+Show packageTier: null as pending, "55" / "130" as active
+6. Epoch Rewards — How they land
+When the main validator signs an epoch and quorum is reached, all activated wallets are rewarded automatically.
+
+Wallet	Package	Reward per epoch	Lands in
+Main validator	$55	~5 MC	frozenBalance
+Main validator	$130	~12 MC	frozenBalance
+Sub-wallet	$55	~5 MC	frozenBalance
+Sub-wallet	$130	~12 MC	frozenBalance
+Sub-wallet	none / null	0	—
+Each wallet earns based on its own package, independently.
+
+7. Check Balances
+Main validator
+GET /api/admin/validators/{address}/balances
+X-Admin-Key: <key>
+
+Sub-wallet
+GET /api/admin/validators/{validatorAddress}/sub-wallets/{subAddress}/balances
+X-Admin-Key: <key>
+
+Response (both):
+
+{
+  "address": "mxc1...",
+  "packageTier": "130",
+  "directCount": 3,
+  "frozenBalanceWei": "36000000000000000000",
+  "frozenBalanceMc": "36.000000",
+  "availableBalanceWei": "12000000000000000000",
+  "availableBalanceMc": "12.000000",
+  "referralReleasePerDirectMc": "10.000000",
+  "totalUnlockableMc": "30.000000",
+  "canReleaseNowMc": "18.000000"
+}
+
+8. Release Frozen → Available Balance
+Unlocks based on the wallet's own referral count:
+
+directCount × 10 MC = total unlockable
+
+Main validator
+POST /api/admin/validators/{address}/release-balance
+X-Admin-Key: <key>
+
+Sub-wallet
+POST /api/admin/validators/{validatorAddress}/sub-wallets/{subAddress}/release-balance
+X-Admin-Key: <key>
+
+Success:
+
+{
+  "ok": true,
+  "releasedWei": "10000000000000000000",
+  "releasedMc": "10.000000",
+  "frozenBalanceMc": "26.000000",
+  "availableBalanceMc": "22.000000",
+  "directCount": 3
+}
+
+Nothing to release:
+
+{
+  "ok": true,
+  "released": "0",
+  "message": "No additional balance to release based on current referral count"
+}
+
+9. Withdraw Available Balance
+Standard MC transfer from the wallet:
+
+POST /api/transactions
+Content-Type: application/json
+
+{
+  "fromAddress": "mxc1...",
+  "toAddress":   "mxc1...",
+  "amount":      "10000000000000000000",
+  "nonce":       5
+}
+
+Get nonce from GET /api/accounts/{address} first.
+
+10. Complete Flow Summary
+Register validator          POST /api/validators/register
+  └─ must be activated on-chain first
+Add sub-wallets             POST /api/validators/{addr}/sub-wallets
+  └─ can add BEFORE activation — packageTier will be null
+Send heartbeat every 8 min  POST /api/validators/heartbeat
+  └─ include epoch signature
+  └─ server auto-verifies any pending sub-wallets
+Fetch sub-wallet list       GET  /api/validators/{addr}/sub-wallets
+  └─ after heartbeat to see updated packageTier
+Epoch rewards auto-credited → frozenBalance (main + all activated sub-wallets)
+Check balances              GET  /api/admin/validators/{addr}/balances
+                            GET  /api/admin/validators/{addr}/sub-wallets/{sub}/balances
+Release frozen              POST /api/admin/validators/{addr}/release-balance
+                            POST /api/admin/validators/{addr}/sub-wallets/{sub}/release-balance
+Withdraw                    POST /api/transactions

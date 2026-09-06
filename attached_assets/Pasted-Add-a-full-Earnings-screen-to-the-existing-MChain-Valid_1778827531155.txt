@@ -1,0 +1,137 @@
+Add a full Earnings screen to the existing MChain Validator Wallet app.
+
+## Base URL
+https://chain.mvault.pro/api
+
+## New screen: Earnings (new tab in the bottom navigation)
+
+### Summary card (top of screen)
+
+Call GET /api/validators/{mxc1Address}/earnings on mount and every 60s.
+
+Response shape:
+{
+  "address": "mxc1...",
+  "moniker": "My Phone",
+  "totalActiveMinutes": 3620,
+  "currentBalanceMc": "12.500000",
+  "earnings": {
+    "treasuryTotalMc": "8.200000",    // uptime-based treasury rewards
+    "gasTotalMc":      "4.300000",    // gas fee rewards from block proposals
+    "combinedTotalMc": "12.500000"    // total ever earned
+  },
+  "stats": {
+    "totalRewardPeriods":  8,
+    "lastRewardPeriod":   "2026-05-15T00",
+    "totalBlocksProposed": 142,
+    "totalTxsProcessed":   37
+  }
+}
+
+Render three stat boxes in a row:
+  [Treasury Rewards]   [Gas Fee Rewards]   [Combined Total]
+  8.2000 MC            4.3000 MC           12.5000 MC
+  8 periods            142 blocks · 37 txs all time
+
+Below: two stat pills — "Blocks Proposed: 142" · "Txs Processed: 37"
+
+### Treasury Rewards tab
+
+Call GET /api/validators/{mxc1Address}/treasury-rewards?limit=50&offset=0
+
+Response:
+{
+  "rewards": [
+    {
+      "id": 1,
+      "period": "2026-05-15T00",
+      "activeMinutes": 58,
+      "totalNetworkMinutes": 60,
+      "uptimePct": "96.7",
+      "amountMc": "4.931506",
+      "status": "distributed",
+      "distributedAt": "2026-05-15T01:00:00.000Z"
+    }
+  ],
+  "total": 8,
+  "limit": 50,
+  "offset": 0
+}
+
+Render a list. Each row:
+  Period label (e.g. "May 15, 2026 – 01:00")     Amount: 4.9315 MC
+  Uptime bar: ████████░░ 96.7%  (58/60 min)       [distributed badge]
+
+Color the uptime bar: green ≥ 80%, yellow ≥ 50%, red < 50%.
+Pending rewards show an amber "pending" chip instead of timestamp.
+
+Implement load-more pagination using offset.
+
+### Gas Fee Rewards tab
+
+Call GET /api/validators/{mxc1Address}/gas-rewards?limit=50&offset=0
+
+Response:
+{
+  "gasRewards": [
+    {
+      "id": 1,
+      "blockHeight": 14203,
+      "txCount": 3,
+      "totalFeeMc":       "0.000063",
+      "validatorShareMc": "0.000044",
+      "adminShareMc":     "0.000019",
+      "isStaked": false,
+      "splitPct": "70/30",
+      "timestamp": "2026-05-15T06:43:00.000Z"
+    }
+  ],
+  "total": 142,
+  "limit": 50,
+  "offset": 0
+}
+
+Render a list. Each row:
+  Block #14,203 — 3 txs                           +0.000044 MC
+  Total fee: 0.000063 MC                           [70/30 chip]
+  May 15, 2026 06:43
+
+The split chip: yellow "70/30" if unstaked, green "90/10" if staked.
+Tapping the row copies the block height to clipboard.
+
+Implement load-more pagination using offset.
+
+### Blocks Proposed tab
+
+Call GET /api/validators/{mxc1Address}/blocks?limit=50&offset=0
+
+Response:
+{
+  "blocks": [
+    {
+      "height": 14203,
+      "hash": "0xabc...",
+      "txCount": 3,
+      "gasUsed": 63000,
+      "timestamp": "2026-05-15T06:43:00.000Z"
+    }
+  ],
+  "total": 142,
+  "totalTxsProcessed": 37,
+  "totalGasUsed": "5229000",
+  "limit": 50,
+  "offset": 0
+}
+
+Render as a compact table:
+  Block     Txs    Gas Used    Time
+  #14,203   3      63,000      May 15 06:43
+  #14,190   0      0           May 15 06:42
+
+Rows with txCount > 0 are highlighted with a subtle green left border.
+Tapping a row copies the block hash to clipboard and shows a toast.
+
+### Error states
+- If the validator address is not found (404): show "Validator not registered" banner
+- If network error: show retry button
+- All lists show a skeleton loader on first load

@@ -1,0 +1,134 @@
+Epoch Signing — App API Reference
+Base URL: https://chain.mvault.pro/api
+
+Overview for the App
+The app only needs one endpoint: POST /validators/heartbeat. Epoch signing is piggybacked onto the regular heartbeat — there is no separate epoch endpoint. On every heartbeat response, the server tells you if there is an open epoch to sign. If there is, you sign it locally and include the signature in your next heartbeat.
+
+Step 1 — Send a Heartbeat
+Send this every 8 minutes while the validator is active.
+
+POST /api/validators/heartbeat
+Content-Type: application/json
+
+Minimal body (no epoch signature):
+
+{
+  "address": "mxc1abc123..."
+}
+
+Full body (with epoch signature — explained in Step 3):
+
+{
+  "address": "mxc1abc123...",
+  "batteryLevel": 87,
+  "isCharging": false,
+  "epochSignature": {
+    "epochNumber": 1342,
+    "signature": "a3f9c2..."
+  }
+}
+
+Success response 200:
+
+{
+  "ok": true,
+  "blockHeight": 134500,
+  "timestamp": "2026-05-22T10:00:00.000Z",
+  "openEpoch": {
+    "epochNumber": 1345,
+    "blockHeight": 134500,
+    "blockHash": "0xabc123...",
+    "signingWindowClosesAt": "2026-05-22T10:25:00.000Z"
+  },
+  "epochResult": null
+}
+
+The key field is openEpoch. When it is not null, there is an epoch waiting for your signature.
+
+Step 2 — Sign the Epoch (on device)
+When openEpoch is not null, sign it locally on the device before the next heartbeat:
+
+message = SHA256( hex_decode(blockHash) )
+signature = secp256k1_sign(message, privateKey)
+
+Field	Description
+blockHash	From openEpoch.blockHash — strip the 0x prefix, hex-decode to raw bytes
+SHA256	Standard SHA-256 of those raw bytes
+secp256k1_sign	Sign using the validator's registered private key (the one matching publicKey used at registration)
+Output	Signature as a lowercase hex string (no 0x prefix)
+The signature must be compact secp256k1 format (64 bytes / 128 hex chars). The signing window is 25 minutes from signingWindowClosesAt — if the app misses it, skip that epoch and wait for the next one.
+
+Step 3 — Submit the Signature via Next Heartbeat
+On the very next heartbeat call, include epochSignature:
+
+{
+  "address": "mxc1abc123...",
+  "epochSignature": {
+    "epochNumber": 1345,
+    "signature": "a3f9c2d1..."
+  }
+}
+
+Response when signature is accepted:
+
+{
+  "ok": true,
+  "blockHeight": 134508,
+  "openEpoch": null,
+  "epochResult": {
+    "ok": true,
+    "nowFinalized": false
+  }
+}
+
+Response when your signature caused quorum to be reached:
+
+{
+  "epochResult": {
+    "ok": true,
+    "nowFinalized": true
+  }
+}
+
+When nowFinalized: true, rewards are distributed immediately to all signers of that epoch.
+
+Possible epochResult Failure Reasons
+These appear in epochResult.reason when epochResult.ok is false:
+
+Reason	Meaning
+epoch_not_found	That epoch number doesn't exist
+already_finalized	Epoch already reached quorum — nothing to do
+signing_window_expired	25-minute window passed — skip this epoch
+already_signed	This validator already submitted for this epoch
+validator_not_eligible	Validator had no heartbeat before the checkpoint
+invalid_signature	Signature failed secp256k1 verification
+None of these are fatal — just skip and continue sending heartbeats normally.
+
+Possible Heartbeat Error Responses
+HTTP	error field	What to do
+403	not_activated	Wallet not active on the smart contract — user needs to buy a package
+403	validator_paused	Call POST /api/validators/restart first
+403	Validator is pending approval	Wait for admin approval
+403	Validator is banned	Permanent — stop sending
+429	too_soon	Sent too early — respect retryAfterSeconds
+404	Validator not found	Wrong address — check registration
+Complete App Flow
+App starts
+  │
+  ├─ POST /api/validators/heartbeat  (every 8 min)
+  │       body: { address }
+  │
+  │   Response includes openEpoch?
+  │   ├─ NO  → wait 8 min, repeat
+  │   └─ YES → sign locally:
+  │              msg = SHA256(hex_decode(blockHash))
+  │              sig = secp256k1_sign(msg, privateKey)
+  │
+  ├─ POST /api/validators/heartbeat  (next ping, ≤25 min later)
+  │       body: { address, epochSignature: { epochNumber, signature } }
+  │
+  │   epochResult.ok?
+  │   ├─ true  → reward credited to frozenBalance
+  │   └─ false → log reason, continue normally
+  │
+  └─ repeat forever

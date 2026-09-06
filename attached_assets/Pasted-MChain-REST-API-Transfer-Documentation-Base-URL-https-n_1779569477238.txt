@@ -1,0 +1,150 @@
+MChain REST API — Transfer Documentation
+Base URL: https://node.mymchain.com
+
+1. Get Account Info (Nonce + Balance)
+Call this before every transaction to get the current nonce.
+
+Request:
+
+GET /api/accounts/{address}
+
+Accepts mxc1 or 0x address.
+
+Response:
+
+{
+  "address": "mxc1g4nd0f6v6d0aw94ucqef0q5vgh883epuy0c7ey",
+  "ethAddress": "0x4566d7a74CD35Fd716BcC03297828c45CE78E43C",
+  "balance": "5000000000000000000",
+  "balanceMc": "5.0",
+  "nonce": 5,
+  "isContract": false,
+  "exists": true
+}
+
+Use nonce value in the next transaction. It increments by 1 after each confirmed transaction.
+
+2. Native MC Transfer
+Request:
+
+POST /api/transactions
+Content-Type: application/json
+
+{
+  "fromAddress": "mxc1g4nd0f6v6d0aw94ucqef0q5vgh883epuy0c7ey",
+  "toAddress":   "mxc1jpc8yktcj24647kf7f6k6xy3erv3wynprspwqf",
+  "amount":      "100000000000000000",
+  "nonce":       5
+}
+
+Field	Required	Notes
+fromAddress	Yes	Sender — mxc1 or 0x
+toAddress	Yes	Recipient — mxc1 or 0x
+amount	Yes	In wei (1 MC = 1000000000000000000)
+nonce	Yes	From /api/accounts
+Success Response (201):
+
+{
+  "hash": "0x46b854bc87ae87f8c3e5d2fc16a8824d26c3a089587e02413f5d3714648fa2d3",
+  "txHash": "0x46b854bc87ae87f8c3e5d2fc16a8824d26c3a089587e02413f5d3714648fa2d3",
+  "status": "pending"
+}
+
+Error Response (400):
+
+{
+  "error": "Insufficient balance (including gas fee)"
+}
+
+3. Token Transfer (ERC-20)
+Request:
+
+POST /api/transactions
+Content-Type: application/json
+
+{
+  "fromAddress": "mxc1g4nd0f6v6d0aw94ucqef0q5vgh883epuy0c7ey",
+  "toAddress":   "0xab8c6267dcca9e70b625014c8f77eee9728e14c3",
+  "amount":      "0",
+  "txType":      "contract_call",
+  "nonce":       5,
+  "data":        "0xa9059cbb000000000000000000000000907072597892abaafac9f2756d1891c8d91712610000000000000000000000000000000000000000000000000de0b6b3a7640000"
+}
+
+Field	Required	Notes
+fromAddress	Yes	Sender — mxc1 or 0x
+toAddress	Yes	Token contract address (always 0x)
+amount	Yes	Always "0" for token transfers
+txType	Yes	Always "contract_call"
+nonce	Yes	From /api/accounts
+data	Yes	ABI-encoded transfer calldata (see below)
+How to build the data field:
+
+0xa9059cbb                                                    ← selector (fixed)
+000000000000000000000000{recipient 0x address, 40 chars}      ← padded to 32 bytes
+{token amount in wei as hex, padded to 64 chars}              ← padded to 32 bytes
+
+Example — send 1 token (18 decimals) to 0x9070...1261:
+
+0xa9059cbb
+000000000000000000000000907072597892abaafac9f2756d1891c8d9171261
+0000000000000000000000000000000000000000000000000de0b6b3a7640000
+
+Recipient inside data must always be in 0x format (no prefix, padded with 24 leading zeros to 64 chars).
+
+Success Response (201):
+
+{
+  "hash": "0x2adf5c29c8fdba5864d1745bf0432cfd295813145386bb414fe37a3407750214",
+  "txHash": "0x2adf5c29c8fdba5864d1745bf0432cfd295813145386bb414fe37a3407750214",
+  "status": "pending"
+}
+
+4. Check Transaction Status
+Request:
+
+GET /api/transactions/{hash}
+
+Response — Native MC transfer:
+
+{
+  "transaction": {
+    "hash": "0x46b854bc...",
+    "status": "confirmed",
+    "txType": "transfer",
+    "from": "mxc1g4nd0f6v6d0aw94ucqef0q5vgh883epuy0c7ey",
+    "to":   "mxc1jpc8yktcj24647kf7f6k6xy3erv3wynprspwqf",
+    "amount": "100000000000000000",
+    "blockHeight": 7150,
+    "gasUsed": 0,
+    "confirmedAt": "2026-05-23T20:10:01.000Z"
+  }
+}
+
+Response — Token transfer:
+
+{
+  "transaction": {
+    "hash": "0x2adf5c29c8fdba5864...",
+    "status": "confirmed",
+    "txType": "contract_call",
+    "from":          "0x4566d7a74CD35Fd716BcC03297828c45CE78E43C",
+    "to":            "0x907072597892abaafac9f2756d1891c8d9171261",
+    "tokenContract": "0xAB8C6267dcCA9e70B625014C8F77eEE9728e14C3",
+    "tokenAmount":   "100000000000000000",
+    "amount": "0",
+    "blockHeight": 7236,
+    "gasUsed": 12955,
+    "confirmedAt": "2026-05-23T19:56:21.000Z"
+  }
+}
+
+from / to always reflect the format used at submission (0x if MetaMask, mxc1 if REST API).
+For token transfers, to is the actual recipient, tokenContract is the contract, tokenAmount is the token amount in wei.
+
+5. Status Values
+Value	Meaning
+pending	In queue, not yet in a block
+confirmed	Included in a block, final
+failed	Rejected (check errorMsg field)
+Transactions confirm within 1–2 seconds.

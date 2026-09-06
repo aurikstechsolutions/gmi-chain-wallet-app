@@ -1,0 +1,177 @@
+Build a React Native mobile app using Expo (TypeScript) called "MChain Validator Wallet".
+
+## What it does
+The app has two roles in one:
+1. VALIDATOR — the phone registers itself as a Proof-of-Mobile validator on the Mchain blockchain, sends heartbeats every 60 seconds (battery level, charging state), and earns MC token rewards.
+2. WALLET — stores the user's mxc1... address and private key securely, shows MC balance, lets them send/receive MC tokens, and shows transaction history.
+
+---
+
+## Chain Details
+- Chain URL: https://chain.mvault.pro
+- Chain ID: 1888
+- Native token: MC (18 decimals)
+- Address format: bech32 with prefix "mxc1" (also has a 0x EVM form)
+- Fixed supply: 180,000,000 MC
+
+---
+
+## Key Generation
+Generate a secp256k1 keypair:
+1. Generate 32 random bytes → private key
+2. Derive compressed public key (33 bytes)
+3. Hash public key with keccak-256 → take last 20 bytes → Ethereum address (0x...)
+4. Encode those 20 bytes with bech32, prefix "mxc1" → MxC address
+
+Use libraries: @noble/curves (secp256k1), @noble/hashes (keccak_256), bech32
+Store private key in Expo SecureStore (never in plain AsyncStorage).
+
+---
+
+## API Endpoints (all at https://chain.mvault.pro/api)
+
+### Wallet
+GET  /accounts/:address           → { address, ethAddress, balance, nonce }
+GET  /transactions?address=...&limit=20  → { transactions: [...] }
+POST /transactions                → { from, to, amount, nonce, signature }  → { txHash }
+GET  /accounts/:address/balance   → { balance }  (in wei string)
+
+Transaction body:
+{
+  from: "mxc1...",
+  to: "mxc1...",
+  amount: "<wei string>",  // MC amount × 10^18
+  nonce: <number>,
+  signature: "<hex>"       // secp256k1 sign of keccak256(from+to+amount+nonce)
+}
+
+### Validator Registration
+POST /validators/register
+Body: {
+  address: "mxc1...",
+  ethAddress: "0x...",
+  publicKey: "<hex 66-char compressed pubkey>",
+  deviceId: "<expo device id>",
+  moniker: "<user chosen name>",
+  commissionRate: "10"   // percentage string
+}
+Response: { validator: { id, address, status, ... } }
+Note: status starts as "pending" — admin must approve before heartbeats work.
+
+### Heartbeat (send every 60 seconds when app is active)
+POST /validators/heartbeat
+Body: {
+  address: "mxc1...",
+  batteryLevel: <0-100 integer>,
+  isCharging: <boolean>,
+  activeMinutes: <integer>
+}
+Response: { ok: true, blockHeight: <number> }
+If status is "pending", server returns 403 — show a "waiting for approval" banner.
+
+### Validator Status
+GET /validators/:address  → { validator: { id, address, status, totalActiveMinutes, lastSeenAt, commissionRate, ... } }
+
+### Rewards
+GET /rewards?validatorAddress=mxc1...&limit=30  → { rewards: [...] }
+
+### Chain Info
+GET /chain/info  → { chainId, blockHeight, totalSupply, gasPrice, ... }
+GET /healthz     → { status: "ok" }
+
+---
+
+## Screens
+
+### 1. Onboarding / Setup (first launch)
+- Generate keypair automatically
+- Ask user to set a moniker (validator name, max 32 chars)
+- Show the generated mxc1 address with a QR code
+- "Save your key" warning — show the private key once with a copy button, warn them to back it up
+- "Register as Validator" button → calls POST /validators/register
+- After registration: show "Application submitted — waiting for admin approval"
+
+### 2. Dashboard (home tab)
+- MC Balance (large, formatted: "1,234.56 MC")
+- Address with copy button and QR code
+- Validator status card: Online / Pending / Offline with pulsing dot
+  - If active: show uptime (totalActiveMinutes formatted as Xd Yh Zm), last heartbeat time
+  - If pending: yellow banner "Waiting for admin approval"
+  - If banned/rejected: red banner
+- Today's estimated reward (based on your share of active minutes vs total)
+- Recent transactions (last 5)
+- Latest block height (auto-refreshes every 10s)
+
+### 3. Send (send tab)
+- Input: recipient address (mxc1... or scan QR)
+- Input: amount in MC
+- Shows gas fee estimate
+- Confirm screen with summary before signing
+- Signs transaction locally with private key, broadcasts to /transactions
+- Shows txHash on success
+
+### 4. Receive (receive tab)
+- Large QR code of mxc1 address
+- Address text with copy button
+- Share button
+
+### 5. Transactions (history tab)
+- Paginated list of sent/received transactions
+- Each row: direction (in/out arrow), amount MC, from/to address (shortened), timestamp, txHash (tap to copy)
+
+### 6. Validator Stats (validator tab)
+- Status badge (active / pending / offline / banned)
+- Total active minutes (formatted)
+- Commission rate
+- Heartbeat history: last 20 heartbeats with battery%, charging state, block height, timestamp
+- Rewards history: last 30 days, each row showing date, MC earned, pool share %
+- Total MC earned all-time
+
+### 7. Settings
+- Moniker (editable, updates locally)
+- Show/hide private key (with biometric auth gate)
+- Export private key (copy to clipboard after biometric)
+- App version, chain info
+
+---
+
+## Background Heartbeat
+- Use expo-background-fetch or expo-task-manager to send heartbeats every 60 seconds even when app is in background
+- Read battery level with expo-battery: Battery.getBatteryLevelAsync() (0-1 float → multiply by 100)
+- Read charging state: Battery.getBatteryStateAsync()
+- If heartbeat fails with 403 (pending), show a persistent banner on dashboard
+
+---
+
+## Design
+- Dark theme only: background #0A0F1E (deep navy), primary accent #0EA5E9 (electric cyan), text white
+- Use react-native-reanimated for smooth animations
+- Pulsing green dot when validator is active and sending heartbeats
+- Use expo-linear-gradient for cards
+- Bottom tab navigator with icons: Home, Send, Receive, Validator, Settings
+
+---
+
+## Tech Stack
+- Expo SDK 52 (managed workflow)
+- TypeScript
+- @noble/curves, @noble/hashes, bech32 for crypto
+- expo-secure-store for private key storage
+- expo-battery for battery/charging info
+- expo-barcode-scanner for QR scanning
+- expo-camera for QR scanning
+- react-native-qrcode-svg for QR display
+- @tanstack/react-query for data fetching
+- expo-background-fetch + expo-task-manager for background heartbeat
+- react-navigation (native stack + bottom tabs)
+- NativeWind (Tailwind for React Native) for styling
+
+---
+
+## Important Notes
+- The private key must NEVER leave the device. All signing happens locally.
+- Balance is returned in wei (string), divide by 10^18 to show MC
+- The chain uses secp256k1 signatures — sign keccak256(txData) with the private key
+- Heartbeats only work when validator status is "active" (approved by admin)
+- Show a clear UI state for "pending approval" — the phone is registered but waiting
+- Handle network errors gracefully — the chain may have brief downtime

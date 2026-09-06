@@ -1,0 +1,67 @@
+"Could not coalesce error" is a specific EIP-1193 wallet error — it means the wallet received a JSON-RPC response it couldn't parse or map to its internal format. Let me give your dev the exact call sequence:
+
+Exact DApp ↔ Wallet communication flow
+Step 1 — Connect
+method: "eth_requestAccounts"
+params: []
+
+Wallet must return: ["0xYourAddress"]
+
+Step 2 — Switch to MChain (every connect)
+First tries:
+
+method: "wallet_switchEthereumChain"
+params: [{ "chainId": "0x760" }]
+
+If that throws (chain not added yet), falls back to:
+
+method: "wallet_addEthereumChain"
+params: [{
+  "chainId": "0x760",
+  "chainName": "MXC zkEVM Testnet",
+  "rpcUrls": ["https://node.mymchain.com/api/rpc"],
+  "nativeCurrency": { "name": "MxC", "symbol": "MxC", "decimals": 18 },
+  "blockExplorerUrls": ["https://explorer.mxc.com"]
+}]
+
+Wallet must return: null on success (EIP-3085 spec).
+
+Step 3 — Pre-flight simulation (NO wallet involved)
+The DApp calls the MChain RPC directly (not through the wallet) using eth_call with staticCall. This is purely to catch contract reverts before asking the user to sign. The wallet doesn't see this step at all.
+
+Step 4 — Send registration TX
+method: "eth_sendTransaction"
+params: [{
+  "from": "0xUserAddress",
+  "to": "0x60c5bd746f6245ecE5daC006082a7bd13f521aF8",
+  "data": "0x<ABI-encoded register(sponsor, 0x0, placeLeft)>",
+  "gasLimit": "0x927C0",   ← 600,000 in hex
+  "value": "0x0"
+}]
+
+⚠️ Critical for the wallet dev: The DApp deliberately omits gasPrice and gas from the suggested TX and passes gasLimit instead. The wallet must:
+
+Accept gasLimit (not just gas) — they are the same field, EIP-1559 uses gasLimit, older wallets use gas
+NOT call eth_estimateGas on MChain — it returns 0x0 which causes an "out of gas" revert. Use the provided gasLimit as-is.
+Set gasPrice itself to 1000000000 (1 gwei) — MChain's fixed gas price.
+Wallet must return: "0xTxHash" — a 32-byte hex transaction hash.
+
+Where "Could not coalesce error" likely comes from
+This error almost always appears in wallets that use WalletConnect v1 or a custom JSON-RPC bridge. The most common causes:
+
+Cause	Fix
+wallet_addEthereumChain returns non-null (e.g. true) instead of null	Return null on success per EIP-3085
+eth_sendTransaction returns the hash without "0x" prefix	Always return "0x" + txHash
+Wallet calls eth_estimateGas and gets 0x0 back → coerces to 0 → fails	Respect the gasLimit already in the TX and skip estimation
+Wallet tries to fetch nonce via eth_getTransactionCount with "pending" tag	MChain may not support "pending" tag — fall back to "latest"
+Wallet calls eth_getBlockByNumber("latest", false) to check gas prices and can't parse the response	MChain blocks have custom fields (MXC bech32 miner address) — wallet must not crash on unknown fields
+Summary for the wallet dev
+The DApp sends standard EIP-1193 eth_sendTransaction with an explicit gasLimit. The wallet should:
+
+Support wallet_addEthereumChain (EIP-3085) returning null on success
+Pass gasLimit straight into the TX — do not call eth_estimateGas (returns 0 on MChain)
+Use gasPrice: 1000000000 (1 gwei) — MChain has a fixed gas price
+Use eth_getTransactionCount(address, "latest") for nonce — not "pending"
+When parsing block responses, ignore unknown fields gracefully (MChain blocks have non-standard miner field format)
+Return the TX hash as a "0x"-prefixed hex string from eth_sendTransaction
+The most likely single cause of "could not coalesce" is #5 — the wallet fetches the latest block to check gas prices, tries to parse the miner field as a standard 0x address, and crashes because MChain returns a bech32-encoded address there.

@@ -1,0 +1,80 @@
+{
+  "expo": {
+    "name": "GMI Wallet",
+    "slug": "mchain-wallet",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/gmi-icon.png",
+    "scheme": "mchain-wallet",
+    "userInterfaceStyle": "light",
+    "newArchEnabled": true,
+    "splash": {
+      "image": "./assets/images/gmi-icon.png",
+      "resizeMode": "contain",
+      "backgroundColor": "#F8FAFC"
+    },
+    "ios": {
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSCameraUsageDescription": "Scan QR codes to get recipient addresses",
+        "UIBackgroundModes": [
+          "fetch",
+          "processing"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.mchain.wallet",
+      "permissions": [
+        "CAMERA",
+        "RECEIVE_BOOT_COMPLETED",
+        "android.permission.CAMERA",
+        "android.permission.RECORD_AUDIO",
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        "android.permission.WAKE_LOCK",
+        "android.permission.NFC"
+      ],
+      "versionCode": 1
+    },
+    "web": {
+      "favicon": "./assets/images/gmi-icon.png"
+    },
+    "plugins": [
+      [
+        "expo-router",
+        {
+          "origin": "https://replit.com/"
+        }
+      ],
+      "expo-font",
+      "expo-web-browser",
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "Allow GMI Wallet to scan QR codes for recipient addresses."
+        }
+      ],
+      "expo-secure-store",
+      "expo-task-manager",
+      "expo-background-fetch",
+      "react-native-nfc-manager",
+      "expo-updates"
+    ],
+    "updates": {
+      "url": "https://u.expo.dev/e6ecd8bb-e7d4-47a5-a6f3-eb91508afe1a"
+    },
+    "runtimeVersion": {
+      "policy": "appVersion"
+    },
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "e6ecd8bb-e7d4-47a5-a6f3-eb91508afe1a"
+      }
+    },
+    "owner": "abinavardhan"
+  }
+}

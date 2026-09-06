@@ -1,0 +1,181 @@
+We are building a mobile validator app for the Mchain blockchain (Chain ID 1729, 
+MxC bech32 addresses). The backend REST API base URL is https://api.mxc.org/api 
+(or point to any node: 5.189.144.115, 62.169.31.67, 217.76.51.75 — all run the 
+same API on port 443 via nginx).
+
+Update the app to use the following API endpoints:
+
+───────────────────────────────────────────────────────────────
+REGISTRATION
+POST /api/validators/register
+Body: { address, ethAddress, publicKey, deviceId?, moniker?, commissionRate? }
+Response 201: { validator: { address, ethAddress, moniker, status: "pending", 
+  commissionRate, totalActiveMinutes, joinedAt } }
+Note: status starts as "pending" — show a waiting-for-approval screen.
+
+───────────────────────────────────────────────────────────────
+HEARTBEAT  (send every 8 minutes)
+POST /api/validators/heartbeat
+Body: {
+  address,
+  batteryLevel: 0–100,
+  isCharging: boolean,
+  deviceSignature?: string,
+  epochSignature?: { epochNumber: number, signature: string }
+}
+Response 200: {
+  ok: true,
+  blockHeight: number,
+  timestamp: string,
+  isStaked: true,
+  sessionExpiresAt: null,
+  openEpoch: {            ← sign this and include in next heartbeat
+    epochNumber: number,
+    blockHeight: number,
+    blockHash: string,    ← sign this hash with the validator's secp256k1 key
+    signingWindowClosesAt: string
+  } | null,
+  epochResult: { ok: boolean, nowFinalized?: boolean, reason?: string } | null
+}
+
+Error responses:
+  403 { error: "validator_paused", restartRequired: true }  → show restart button
+  429 { error: "too_soon", retryAfterSeconds: 45 }          → back off, retry later
+  403 { error: "Validator is pending approval" }            → show pending screen
+  403 { error: "Validator is banned" }                      → show banned screen
+
+Signing logic: every heartbeat response contains openEpoch. 
+Sign openEpoch.blockHash with the validator's secp256k1 private key 
+(sha256 of the raw 32-byte hash, then ECDSA sign). Include the result 
+as epochSignature in the NEXT heartbeat call.
+
+───────────────────────────────────────────────────────────────
+PAUSE / RESTART
+POST /api/validators/pause   Body: { address }
+→ { ok: true, status: "paused", message: string }
+
+POST /api/validators/restart  Body: { address }
+→ { ok: true, status: "active", sessionStartedAt: string, message: string }
+
+───────────────────────────────────────────────────────────────
+VALIDATOR PROFILE
+GET /api/validators/:address
+→ { validator: { address, ethAddress, moniker, status, commissionRate, 
+    totalActiveMinutes, joinedAt, lastSeenAt, sessionStartedAt } }
+
+───────────────────────────────────────────────────────────────
+EARNINGS SUMMARY  (show on dashboard)
+GET /api/validators/:address/earnings
+→ {
+    address, moniker, totalActiveMinutes,
+    currentBalanceMc: "1.234567",
+    earnings: {
+      treasuryTotalMc, gasTotalMc, combinedTotalMc,
+      treasuryTotalWei, gasTotalWei, combinedTotalWei
+    },
+    stats: {
+      totalRewardPeriods, lastRewardPeriod,
+      totalBlocksProposed, totalTxsProcessed
+    }
+  }
+
+───────────────────────────────────────────────────────────────
+EPOCH HISTORY  (new — the main screen to display verified blocks)
+GET /api/validators/:address/epochs?limit=50&offset=0
+→ {
+    address, moniker,
+    summary: {
+      totalEpochs: 64,
+      signed: 58,
+      missed: 6,
+      open: 0,
+      participationRate: "90.6"    ← show as a percentage badge
+    },
+    epochs: [
+      {
+        epochNumber: 119,
+        blockRange: {
+          from: 11900, to: 11999,
+          checkpointBlock: 11900,
+          checkpointHash: "0x..."
+        },
+        blockStats: {
+          blockCount: 100,
+          txCount: 87,
+          gasUsed: "210000"
+        },
+        quorum: {
+          reached: true,
+          signatureCount: 4,
+          eligibleCount: 5,
+          pct: "80.0"
+        },
+        myParticipation: {
+          didSign: true,
+          signedAt: "2026-05-16T10:02:11.000Z",
+          signature: "0x..."
+        },
+        signers: [
+          { address: "mxc1...", moniker: "vishnu-1", signedAt: "...", signature: "0x..." },
+          { address: "mxc1...", moniker: "node-b",   signedAt: "...", signature: "0x..." }
+        ],
+        status: "finalized",       ← "open" | "expired" | "finalized"
+        signingWindowClosesAt: "...",
+        finalizedAt: "...",
+        createdAt: "..."
+      }
+    ],
+    total: 64, limit: 50, offset: 0
+  }
+
+Epoch status meanings for the UI:
+  "open"      → signing window active; show countdown to signingWindowClosesAt
+  "finalized" → quorum reached; show green checkmark + who signed
+  "expired"   → window closed, quorum not reached; show grey/warning
+
+───────────────────────────────────────────────────────────────
+TREASURY REWARD HISTORY  (per-day payout list)
+GET /api/validators/:address/treasury-rewards?limit=50&offset=0
+→ {
+    rewards: [{
+      id, period: "2026-05-15",
+      activeMinutes, totalNetworkMinutes,
+      uptimePct: "92.3",
+      amountMc: "135.241506",
+      status: "distributed",
+      distributedAt: "..."
+    }],
+    total, limit, offset
+  }
+
+───────────────────────────────────────────────────────────────
+GAS REWARD HISTORY  (per-block gas fees earned)
+GET /api/validators/:address/gas-rewards?limit=50&offset=0
+→ {
+    gasRewards: [{
+      id, blockHeight, blockHash,
+      txCount, totalFeeMc,
+      validatorShareMc,   ← 90% if staked, 70% if not
+      adminShareMc,
+      splitPct: "90/10",
+      isStaked: true,
+      timestamp: "..."
+    }],
+    total, limit, offset
+  }
+
+───────────────────────────────────────────────────────────────
+BLOCKS PROPOSED  (blocks this validator produced)
+GET /api/validators/:address/blocks?limit=50&offset=0
+→ {
+    blocks: [{ height, hash, txCount, gasUsed, timestamp }],
+    total, totalTxsProcessed, totalGasUsed,
+    limit, offset
+  }
+
+───────────────────────────────────────────────────────────────
+ALL AMOUNTS: always available in both Wei (string, full precision) 
+and Mc (string, 6 decimal places). Use Mc values for display.
+
+ADDRESS FORMAT: all validator addresses use mxc1 bech32 prefix.
+Each also has an ethAddress (0x...) stored for EVM compatibility.

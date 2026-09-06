@@ -1,0 +1,13 @@
+uploads = []
+
+[[generated]]
+id = "-EyR4LKHyj8vNRV10haXq"
+uri = "file://artifacts/mchain-wallet/assets/images/icon.png"
+type = "image"
+title = "generated_image"
+
+[[outputs]]
+id = "jlQHWkLZWnjaJ9kmtyUlR"
+uri = "file://artifacts/mchain-wallet/assets/images/icon.png"
+type = "image"
+title = "MChain Wallet App Icon"

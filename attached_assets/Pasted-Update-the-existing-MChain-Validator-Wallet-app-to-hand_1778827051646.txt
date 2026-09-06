@@ -1,0 +1,119 @@
+Update the existing MChain Validator Wallet app to handle the unstaked validator session limit.
+
+## What changed on the server
+
+When an unstaked validator's heartbeat session expires (default 2 hours), the heartbeat
+endpoint returns HTTP 403 with this body:
+
+{
+  "error": "session_expired",
+  "message": "Unstaked validator session expired after 2h. Call POST /validators/restart to begin a new session.",
+  "sessionStartedAt": "2026-05-15T06:00:00.000Z",
+  "expiredAt":        "2026-05-15T08:00:00.000Z",
+  "restartRequired":  true
+}
+
+When the heartbeat succeeds, the response now also includes:
+
+{
+  "ok": true,
+  "blockHeight": 1234,
+  "isStaked": false,
+  "sessionExpiresAt": "2026-05-15T08:00:00.000Z"
+}
+
+If isStaked is true, sessionExpiresAt is null — staked validators have no session limit.
+
+## New restart endpoint
+
+POST https://chain.mvault.pro/api/validators/restart
+Content-Type: application/json
+
+Body:
+{ "address": "mxc1..." }
+
+Success response (200):
+{
+  "ok": true,
+  "sessionStartedAt": "2026-05-15T08:35:00.000Z",
+  "sessionExpiresAt": "2026-05-15T10:35:00.000Z",
+  "sessionHours": 2
+}
+
+Error responses:
+- 404: validator not found
+- 403: validator is not active (banned / inactive / pending)
+
+## Changes to make in the app
+
+### 1 — Heartbeat background task
+
+When the heartbeat POST returns 403 AND the body contains `"error": "session_expired"`:
+- Stop the heartbeat background task immediately
+- Set a state flag `sessionExpired = true`
+- Store the `expiredAt` timestamp
+- Push the user to the Dashboard screen if not already there
+
+When the heartbeat succeeds:
+- Read `sessionExpiresAt` from the response
+- Store it in state / SecureStore so it persists across app restarts
+- If `isStaked` is false and sessionExpiresAt is not null, start a countdown timer
+
+### 2 — Dashboard screen updates
+
+Add a session status card below the validator status card. Show one of three states:
+
+STATE A — Session active (isStaked = false):
+  Show a countdown timer: "Session expires in Xh Ym"
+  Green/yellow color depending on time remaining (yellow = under 30 min)
+  Sub-text: "Stake MC to remove session limit"
+
+STATE B — Session expired:
+  Large amber warning banner:
+    "Session Expired"
+    "Your validator session ended. Tap Restart to earn rewards again."
+    [Restart Session] button (prominent, full-width)
+
+STATE C — Staked:
+  Show "Unlimited session — staked validator"
+  Green badge, no countdown
+
+### 3 — Restart button action
+
+When user taps "Restart Session":
+1. Show loading state on the button
+2. Call POST /api/validators/restart with the validator's mxc1 address
+3. On success:
+   - Update sessionExpiresAt in state
+   - Set sessionExpired = false
+   - Resume the heartbeat background task
+   - Show a toast: "Session restarted — you're earning rewards again"
+4. On error:
+   - Show the error message in a toast
+   - Keep the restart button visible
+
+### 4 — Session countdown timer component
+
+Create a reusable SessionTimer component:
+- Takes `expiresAt: string` (ISO timestamp) as prop
+- Updates every second using setInterval
+- Displays: "Xh Ym Zs remaining"
+- Turns yellow when < 30 minutes remain
+- Turns red and shows "EXPIRED" when time runs out
+- On expiry: calls an `onExpired` callback to trigger the restart UI
+
+### 5 — Persist session state across app restarts
+
+On app startup (before starting heartbeat):
+- Load `sessionExpiresAt` from SecureStore
+- If it exists and is in the past → set sessionExpired = true, show restart UI
+- If it exists and is in the future → session still valid, resume heartbeats normally
+- If null → will be set after first heartbeat
+
+### 6 — Validator tab updates
+
+On the Validator Stats tab, add a row to the status grid:
+  Label: "Session"
+  Value: if staked → "Unlimited" (green)
+         if active → countdown timer
+         if expired → "Expired — restart required" (red)
