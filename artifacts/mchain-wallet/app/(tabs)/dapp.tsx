@@ -17,6 +17,8 @@ import {
   GMI_GAS_PRICE_WEI,
   GMI_NATIVE_SYMBOL,
 } from "@/services/chain";
+import { BSC_CHAIN_ID, BSC_RPC_URL } from "@/services/bsc";
+import { SOLANA_RPC_URL } from "@/services/solana";
 
 /** Format a wei amount as GMI with enough decimals to always show non-zero.
  *  Rules: ≥1 → 4dp | ≥0.0001 → 6dp | ≥0.000001 → 8dp | smaller → 10dp */
@@ -68,18 +70,57 @@ interface HistoryEntry {
   visitedAt: number;
 }
 
-// ── Chain constants ────────────────────────────────────────────────────────────
-const CHAIN_ID_HEX = GMI_CHAIN_ID_HEX;
-const CHAIN_ID_DEC = String(GMI_CHAIN_ID);
-const CHAIN_NAME = GMI_CHAIN_NAME;
+// ── DApp networks ──────────────────────────────────────────────────────────────
+type DappNetworkId = "gmi" | "bsc" | "solana";
+type DappNetwork = {
+  id: DappNetworkId;
+  name: string;
+  chainId?: number;
+  chainIdHex?: string;
+  rpcUrl: string;
+  symbol: string;
+  isEvm: boolean;
+};
+
+const DAPP_NETWORKS: Record<DappNetworkId, Omit<DappNetwork, "rpcUrl">> = {
+  gmi: {
+    id: "gmi",
+    name: GMI_CHAIN_NAME,
+    chainId: GMI_CHAIN_ID,
+    chainIdHex: GMI_CHAIN_ID_HEX,
+    symbol: GMI_NATIVE_SYMBOL,
+    isEvm: true,
+  },
+  bsc: {
+    id: "bsc",
+    name: "BNB Smart Chain",
+    chainId: BSC_CHAIN_ID,
+    chainIdHex: `0x${BSC_CHAIN_ID.toString(16)}`,
+    symbol: "BNB",
+    isEvm: true,
+  },
+  solana: {
+    id: "solana",
+    name: "Solana",
+    symbol: "SOL",
+    isEvm: false,
+  },
+};
 
 
 // ── Injected provider script (runs before page JS) ────────────────────────────
 // ALL non-static calls are bridged to React Native via postMessage.
 // React Native owns the fetch to GMI's RPC — no WebView-side networking.
 // This avoids WebView network quirks and lets RN normalise every response.
-function buildProviderScript(ethAddress: string | null): string {
+function buildProviderScript(
+  ethAddress: string | null,
+  solAddress: string | null,
+  network: DappNetwork,
+): string {
   const accounts = ethAddress ? JSON.stringify([ethAddress.toLowerCase()]) : "[]";
+  const solanaAddress = solAddress ? JSON.stringify(solAddress) : "null";
+  const chainIdHex = network.chainIdHex ?? "0x0";
+  const chainIdDec = network.chainId ? String(network.chainId) : "0";
   return `
 (function() {
   if (window.ethereum && (window.ethereum._isGmiWallet || window.ethereum._isMChain)) return;
@@ -87,6 +128,13 @@ function buildProviderScript(ethAddress: string | null): string {
   var _accounts = ${accounts};
   var _pending  = {};
   var _listeners = {};
+  function makeSolanaPublicKey(value) {
+    if (!value) return null;
+    return {
+      toBase58: function() { return value; },
+      toString: function() { return value; }
+    };
+  }
 
   function emit(event, data) {
     (_listeners[event] || []).forEach(function(fn) {
@@ -116,6 +164,14 @@ function buildProviderScript(ethAddress: string | null): string {
       _accounts = data || [];
       ethereum.selectedAddress = _accounts[0] || null;
     }
+    if (event === 'connect' && window.solana) {
+      solana.publicKey = makeSolanaPublicKey(data);
+      solana.isConnected = true;
+    }
+    if (event === 'disconnect' && window.solana) {
+      solana.publicKey = null;
+      solana.isConnected = false;
+    }
     emit(event, data);
   };
 
@@ -137,8 +193,8 @@ function buildProviderScript(ethAddress: string | null): string {
     isMChainWallet: true,
     _isGmiWallet: true,
     _isMChain: true,
-    chainId: '${CHAIN_ID_HEX}',
-    networkVersion: '${CHAIN_ID_DEC}',
+    chainId: '${chainIdHex}',
+    networkVersion: '${chainIdDec}',
     selectedAddress: _accounts[0] || null,
 
     request: function(payload) {
@@ -146,8 +202,8 @@ function buildProviderScript(ethAddress: string | null): string {
       var params = payload.params || [];
 
       // Answered immediately — no bridge needed
-      if (method === 'eth_chainId')  return Promise.resolve('${CHAIN_ID_HEX}');
-      if (method === 'net_version')  return Promise.resolve('${CHAIN_ID_DEC}');
+      if (method === 'eth_chainId')  return Promise.resolve('${chainIdHex}');
+      if (method === 'net_version')  return Promise.resolve('${chainIdDec}');
       if (method === 'eth_accounts') return Promise.resolve(_accounts.slice());
 
       // Everything else goes to React Native (wallet ops + RPC proxy)
@@ -180,6 +236,77 @@ function buildProviderScript(ethAddress: string | null): string {
   };
 
   window.ethereum = ethereum;
+  var solana = {
+    isGmiWallet: true,
+    isPhantom: true,
+    publicKey: makeSolanaPublicKey(${solanaAddress}),
+    isConnected: false,
+    connect: function() {
+      return bridge('solana_connect', []).then(function(result) {
+        solana.publicKey = makeSolanaPublicKey(result.publicKey);
+        solana.isConnected = true;
+        emit('connect', solana.publicKey);
+        return { publicKey: solana.publicKey };
+      });
+    },
+    disconnect: function() {
+      return bridge('solana_disconnect', []).then(function(result) {
+        solana.publicKey = null;
+        solana.isConnected = false;
+        emit('disconnect');
+        return result;
+      });
+    },
+    signMessage: function(message, displayEncoding) {
+      return bridge('solana_signMessage', [{
+        message: Array.from(message),
+        displayEncoding: displayEncoding || 'utf8'
+      }]);
+    },
+    signTransaction: function(transaction) {
+      return bridge('solana_signTransaction', [{
+        transaction: transaction.serialize
+          ? Array.from(transaction.serialize({ requireAllSignatures: false, verifySignatures: false }))
+          : null
+      }]);
+    },
+    signAllTransactions: function(transactions) {
+      return bridge('solana_signAllTransactions', [transactions.map(function(transaction) {
+        return transaction.serialize
+          ? Array.from(transaction.serialize({ requireAllSignatures: false, verifySignatures: false }))
+          : null;
+      })]);
+    },
+    signAndSendTransaction: function(transaction) {
+      return bridge('solana_signAndSendTransaction', [{
+        transaction: transaction.serialize
+          ? Array.from(transaction.serialize({ requireAllSignatures: false, verifySignatures: false }))
+          : null
+      }]);
+    },
+    request: function(payload) {
+      if (payload.method === 'connect') return solana.connect();
+      if (payload.method === 'disconnect') return solana.disconnect();
+      if (payload.method === 'signMessage') return solana.signMessage(payload.params && payload.params[0]);
+      if (payload.method === 'signTransaction') return solana.signTransaction(payload.params && payload.params[0]);
+      if (payload.method === 'signAllTransactions') return solana.signAllTransactions(payload.params && payload.params[0]);
+      if (payload.method === 'signAndSendTransaction') return solana.signAndSendTransaction(payload.params && payload.params[0]);
+      return Promise.reject(new Error('Unsupported Solana wallet method'));
+    },
+    on: function(event, fn) {
+      if (!_listeners[event]) _listeners[event] = [];
+      _listeners[event].push(fn);
+      return this;
+    },
+    removeListener: function(event, fn) {
+      if (_listeners[event]) _listeners[event] = _listeners[event].filter(function(f) { return f !== fn; });
+      return this;
+    },
+    off: function(event, fn) {
+      return this.removeListener(event, fn);
+    }
+  };
+  window.solana = solana;
   if (!window.web3) window.web3 = {};
   window.web3.currentProvider = ethereum;
 })();
@@ -203,7 +330,7 @@ function shortAddr(addr: string): string {
 }
 
 // ── Pending request types ──────────────────────────────────────────────────────
-interface ConnectReq { id: string; origin: string }
+interface ConnectReq { id: string; origin: string; network: DappNetworkId }
 interface SignReq { id: string; message: string; address: string; origin: string }
 interface SendTxReq {
   id: string;
@@ -363,7 +490,7 @@ export default function DAppScreen() {
   const navigation = useNavigation();
   const router = useRouter();
   const { url: deepLinkUrl } = useLocalSearchParams<{ url?: string }>();
-  const { ethAddress, getPrivateKey } = useWallet();
+  const { ethAddress, solAddress, getPrivateKey } = useWallet();
 
   const dappScrollRef = useRef<ScrollView>(null);
 
@@ -398,6 +525,14 @@ export default function DAppScreen() {
 
   // ── Wallet connection state ──────────────────────────────────────────────────
   const [isConnected, setIsConnected] = useState(false);
+  const [dappNetworkId, setDappNetworkId] = useState<DappNetworkId>("gmi");
+  const [showNetworkPicker, setShowNetworkPicker] = useState(false);
+  const activeNetwork: DappNetwork = {
+    ...DAPP_NETWORKS[dappNetworkId],
+    rpcUrl: dappNetworkId === "gmi" ? getNodeUrl()
+      : dappNetworkId === "bsc" ? BSC_RPC_URL
+      : SOLANA_RPC_URL,
+  };
 
   // ── Pending modals ───────────────────────────────────────────────────────────
   const [connectReq, setConnectReq] = useState<ConnectReq | null>(null);
@@ -490,9 +625,34 @@ export default function DAppScreen() {
     const origin = originOf(displayUrl);
 
     switch (method) {
+      // ── Solana wallet connection ───────────────────────────────────────────
+      case "solana_connect": {
+        if (dappNetworkId !== "solana" || !solAddress) {
+          rejectRequest(id, 4001, "Select Solana and make sure a Solana address is available.");
+          return;
+        }
+        if (isConnected) {
+          resolveRequest(id, { publicKey: solAddress });
+          return;
+        }
+        setConnectReq({ id, origin, network: "solana" });
+        break;
+      }
+
+      case "solana_disconnect": {
+        emitEvent("disconnect", null);
+        resolveRequest(id, null);
+        setIsConnected(false);
+        break;
+      }
+
       // ── Connection ──────────────────────────────────────────────────────────
       case "eth_requestAccounts":
       case "wallet_requestPermissions": {
+        if (!activeNetwork.isEvm) {
+          rejectRequest(id, 4902, "This DApp is on Solana. Use window.solana instead of the Ethereum provider.");
+          return;
+        }
         if (isConnected && ethAddress) {
           // Already connected — return immediately
           resolveRequest(id, method === "wallet_requestPermissions"
@@ -500,7 +660,7 @@ export default function DAppScreen() {
             : [ethAddress.toLowerCase()]);
           return;
         }
-        setConnectReq({ id, origin });
+        setConnectReq({ id, origin, network: dappNetworkId });
         break;
       }
 
@@ -514,12 +674,37 @@ export default function DAppScreen() {
       }
 
       case "wallet_switchEthereumChain": {
-        // We only support GMI Chain — always "switch" to it
+        const requestedChain = String((params[0] as { chainId?: string } | undefined)?.chainId ?? "").toLowerCase();
+        const target = (Object.values(DAPP_NETWORKS) as Array<Omit<DappNetwork, "rpcUrl">>)
+          .find((candidate) => candidate.isEvm && candidate.chainIdHex === requestedChain);
+        if (!target) {
+          rejectRequest(id, 4902, "This EVM network is not supported by GMI Wallet.");
+          return;
+        }
+        if (target.id !== dappNetworkId) {
+          setDappNetworkId(target.id);
+          setIsConnected(false);
+          emitEvent("accountsChanged", []);
+          setTimeout(() => webViewRef.current?.reload(), 0);
+        }
         resolveRequest(id, null);
         break;
       }
 
       case "wallet_addEthereumChain": {
+        const requestedChain = String((params[0] as { chainId?: string } | undefined)?.chainId ?? "").toLowerCase();
+        const target = (Object.values(DAPP_NETWORKS) as Array<Omit<DappNetwork, "rpcUrl">>)
+          .find((candidate) => candidate.isEvm && candidate.chainIdHex === requestedChain);
+        if (!target) {
+          rejectRequest(id, 4902, "This EVM network is not supported by GMI Wallet.");
+          return;
+        }
+        if (target.id !== dappNetworkId) {
+          setDappNetworkId(target.id);
+          setIsConnected(false);
+          emitEvent("accountsChanged", []);
+          setTimeout(() => webViewRef.current?.reload(), 0);
+        }
         resolveRequest(id, null);
         break;
       }
@@ -586,7 +771,11 @@ export default function DAppScreen() {
         //  • normalise compatible responses (bech32 miner field, etc.)
         //  • fix eth_estimateGas always returning 21 000 for contract calls
         //  • avoid WebView-side networking issues (CORS timing, SSL stack, etc.)
-        const rpcUrl = getNodeUrl();
+        if (!activeNetwork.isEvm) {
+          rejectRequest(id, 4902, "This request requires an EVM network.");
+          return;
+        }
+        const rpcUrl = activeNetwork.rpcUrl;
         try {
           const rpcRes = await fetch(rpcUrl, {
             method: "POST",
@@ -631,7 +820,7 @@ export default function DAppScreen() {
         break;
       }
     }
-  }, [displayUrl, isConnected, ethAddress]);
+  }, [activeNetwork, dappNetworkId, displayUrl, isConnected, ethAddress, solAddress]);
 
   // Ref to hold the raw (possibly hex) message for personal_sign
   const signReqRaw = useRef<string>("");
@@ -690,7 +879,17 @@ export default function DAppScreen() {
 
   // ── Connect approval ──────────────────────────────────────────────────────────
   function approveConnect() {
-    if (!connectReq || !ethAddress) return;
+    if (!connectReq) return;
+    if (connectReq.network === "solana") {
+      if (!solAddress) return;
+      resolveRequest(connectReq.id, { publicKey: solAddress });
+      emitEvent("connect", solAddress);
+      setIsConnected(true);
+      setConnectReq(null);
+      if (Platform.OS !== "web") Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+      return;
+    }
+    if (!ethAddress) return;
     const addr = ethAddress.toLowerCase();
     if (connectReq.id.startsWith("wallet_")) {
       resolveRequest(connectReq.id, [{ parentCapability: "eth_accounts" }]);
@@ -732,14 +931,19 @@ export default function DAppScreen() {
   // ── Send Tx approval ──────────────────────────────────────────────────────────
   async function approveSendTx() {
     if (!sendTxReq || !ethAddress) return;
+    if (!activeNetwork.isEvm) {
+      rejectRequest(sendTxReq.id, 4902, "This transaction requires an EVM network.");
+      setSendTxReq(null);
+      return;
+    }
     setTxBusy(true);
     try {
       const pk = await getPrivateKey();
       if (!pk) throw new Error("No private key");
-      const rpcUrl = getNodeUrl();
+      const rpcUrl = activeNetwork.rpcUrl;
 
       // ── Diagnostic: verify account exists and has balance ─────────────────
-      const [nonceRes, balanceRes] = await Promise.all([
+      const [nonceRes, balanceRes, gasPriceRes] = await Promise.all([
         fetch(rpcUrl, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -750,9 +954,18 @@ export default function DAppScreen() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ jsonrpc: "2.0", id: 10, method: "eth_getBalance", params: [ethAddress, "latest"] }),
         }).then(r => r.json()),
+        fetch(rpcUrl, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ jsonrpc: "2.0", id: 11, method: "eth_gasPrice", params: [] }),
+        }).then(r => r.json()),
       ]);
       const nonce = parseInt(nonceRes.result ?? "0x0", 16);
       const balanceWei = BigInt(balanceRes.result ?? "0x0");
+      const gasPriceWei = BigInt(
+        gasPriceRes.result ?? (activeNetwork.id === "gmi" ? `0x${GMI_GAS_PRICE_WEI.toString(16)}` : "0x0"),
+      );
+      if (gasPriceWei <= 0n) throw new Error(`Could not read the ${activeNetwork.name} gas price.`);
 
       console.log("[DApp TX] from:", ethAddress, "nonce:", nonce, "balance:", balanceWei.toString());
 
@@ -771,6 +984,8 @@ export default function DAppScreen() {
       // GMI currently reports a 1 Gwei gas price.
       const signed = signLegacyTransaction(sendTxReq.to, valueWei, nonce, pk, {
         gasLimit: BigInt(parseInt(sendTxReq.gas || "0x927C0", 16)),
+        gasPrice: gasPriceWei,
+        chainId: activeNetwork.chainId,
         data: dataBytes,
       });
 
@@ -847,6 +1062,8 @@ export default function DAppScreen() {
     urlText: { flex: 1, fontSize: 12, fontFamily: "Inter_400Regular", color: colors.foreground },
     homeBtn: { width: 36, height: 36, borderRadius: 10, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border, alignItems: "center", justifyContent: "center" },
     progressBar: { height: 2, backgroundColor: colors.primary },
+    networkSwitcher: { flexDirection: "row", alignItems: "center", alignSelf: "flex-start", gap: 6, marginHorizontal: 14, marginBottom: 6, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 10, backgroundColor: colors.background, borderWidth: 1, borderColor: colors.border },
+    networkSwitcherText: { fontSize: 11, fontFamily: "Inter_600SemiBold", color: colors.foreground },
 
     // Connected badge row
     connectedRow: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", paddingHorizontal: 14, paddingVertical: 6, borderTopWidth: 1, borderTopColor: colors.border + "60" },
@@ -885,6 +1102,13 @@ export default function DAppScreen() {
     dangerBtn: { flex: 1, borderRadius: 14, overflow: "hidden" as const },
     dangerGrad: { paddingVertical: 14, alignItems: "center", justifyContent: "center" },
     dangerText: { fontSize: 15, fontFamily: "Inter_700Bold", color: "#FFF" },
+    networkOptions: { paddingHorizontal: 20, gap: 10, marginBottom: 12 },
+    networkOption: { flexDirection: "row", alignItems: "center", gap: 12, padding: 13, borderRadius: 14, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.background },
+    networkOptionSelected: { borderColor: colors.primary, backgroundColor: colors.primary + "10" },
+    networkOptionIcon: { width: 36, height: 36, borderRadius: 11, alignItems: "center", justifyContent: "center", backgroundColor: colors.card },
+    networkOptionText: { flex: 1, gap: 3 },
+    networkOptionName: { fontSize: 14, fontFamily: "Inter_700Bold", color: colors.foreground },
+    networkOptionMeta: { fontSize: 11, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
 
     // History
     historySection: { marginBottom: 20 },
@@ -904,7 +1128,11 @@ export default function DAppScreen() {
   // ── In-app browser ────────────────────────────────────────────────────────────
   if (activeUrl) {
     const shortUrl = displayUrl.replace(/^https?:\/\//, "").replace(/\/$/, "");
-    const injectedJS = buildProviderScript(isConnected ? ethAddress : null);
+    const injectedJS = buildProviderScript(
+      isConnected && activeNetwork.isEvm ? ethAddress : null,
+      isConnected && !activeNetwork.isEvm ? solAddress : null,
+      activeNetwork,
+    );
 
     return (
       <View style={s.container}>
@@ -932,13 +1160,28 @@ export default function DAppScreen() {
             </TouchableOpacity>
           </View>
 
+          {/* Network selector */}
+          <TouchableOpacity
+            style={s.networkSwitcher}
+            onPress={() => setShowNetworkPicker(true)}
+            activeOpacity={0.8}
+          >
+            <View style={s.connectedDot} />
+            <Text style={s.networkSwitcherText}>{activeNetwork.name}</Text>
+            <Icon name="chevron-down" size={13} color={colors.mutedForeground} />
+          </TouchableOpacity>
+
           {/* Connected chain badge */}
-          {isConnected && ethAddress && (
+          {isConnected && (activeNetwork.isEvm ? ethAddress : solAddress) && (
             <View style={s.connectedRow}>
               <View style={s.connectedLeft}>
                 <View style={s.connectedDot} />
-                <Text style={s.connectedChain}>{CHAIN_NAME} · Chain {CHAIN_ID_DEC}</Text>
-                <Text style={s.connectedAddr}>{shortAddr(ethAddress)}</Text>
+                <Text style={s.connectedChain}>
+                  {activeNetwork.name}{activeNetwork.chainId ? ` · Chain ${activeNetwork.chainId}` : ""}
+                </Text>
+                <Text style={s.connectedAddr}>
+                  {shortAddr(activeNetwork.isEvm ? ethAddress ?? "" : solAddress ?? "")}
+                </Text>
               </View>
               <TouchableOpacity
                 style={s.disconnectBtn}
@@ -974,6 +1217,66 @@ export default function DAppScreen() {
           mixedContentMode="compatibility"
         />
 
+        {/* ── Network picker ────────────────────────────────────────────── */}
+        <Modal
+          visible={showNetworkPicker}
+          transparent
+          animationType="slide"
+          onRequestClose={() => setShowNetworkPicker(false)}
+        >
+          <View style={s.overlay}>
+            <View style={[s.sheet, { paddingBottom: insets.bottom }]}>
+              <View style={s.sheetHandle} />
+              <View style={s.sheetHeader}>
+                <Text style={s.sheetTitle}>Choose Network</Text>
+                <Text style={s.sheetSubtitle}>
+                  The DApp provider and signing flow will use the selected network.
+                </Text>
+              </View>
+              <View style={s.networkOptions}>
+                {(Object.values(DAPP_NETWORKS) as Array<Omit<DappNetwork, "rpcUrl">>).map((network) => {
+                  const selected = network.id === dappNetworkId;
+                  return (
+                    <TouchableOpacity
+                      key={network.id}
+                      style={[s.networkOption, selected && s.networkOptionSelected]}
+                      onPress={() => {
+                        setDappNetworkId(network.id);
+                        setIsConnected(false);
+                        setShowNetworkPicker(false);
+                        webViewRef.current?.reload();
+                      }}
+                      activeOpacity={0.8}
+                    >
+                      <View style={s.networkOptionIcon}>
+                        <Icon
+                          name={network.id === "solana" ? "flash-outline" : "globe-outline"}
+                          size={18}
+                          color={selected ? colors.primary : colors.mutedForeground}
+                        />
+                      </View>
+                      <View style={s.networkOptionText}>
+                        <Text style={s.networkOptionName}>{network.name}</Text>
+                        <Text style={s.networkOptionMeta}>
+                          {network.isEvm ? `EVM · Chain ${network.chainId}` : "Solana Mainnet · Ed25519"}
+                        </Text>
+                      </View>
+                      {selected && <Icon name="checkmark-circle" size={20} color={colors.primary} />}
+                    </TouchableOpacity>
+                  );
+                })}
+              </View>
+              <TouchableOpacity
+                style={[s.cancelBtn, { marginHorizontal: 20, marginTop: 8, marginBottom: 8 }]}
+                onPress={() => setShowNetworkPicker(false)}
+                activeOpacity={0.8}
+              >
+                <Text style={s.cancelText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+
         {/* ── Connect approval modal ──────────────────────────────────── */}
         <Modal visible={!!connectReq} transparent animationType="slide" onRequestClose={rejectConnect}>
           <View style={s.overlay}>
@@ -981,7 +1284,9 @@ export default function DAppScreen() {
               <View style={s.sheetHandle} />
               <View style={s.sheetHeader}>
                 <Text style={s.sheetTitle}>Connect Wallet</Text>
-                <Text style={s.sheetSubtitle}>This site wants to connect to your GMI Wallet</Text>
+                <Text style={s.sheetSubtitle}>
+                  This site wants to connect to your GMI Wallet on {connectReq?.network === "solana" ? "Solana" : activeNetwork.name}
+                </Text>
               </View>
 
               <View style={s.originRow}>
@@ -991,12 +1296,20 @@ export default function DAppScreen() {
 
               <View style={s.infoBox}>
                 <View style={s.infoRow}>
-                  <Text style={s.infoRowLabel}>Wallet</Text>
-                  <Text style={s.infoRowValue} numberOfLines={1}>{ethAddress ? shortAddr(ethAddress) : "—"}</Text>
+                  <Text style={s.infoRowLabel}>Address</Text>
+                  <Text style={s.infoRowValue} numberOfLines={1}>
+                    {(connectReq?.network === "solana" ? solAddress : ethAddress)
+                      ? shortAddr(connectReq?.network === "solana" ? solAddress ?? "" : ethAddress ?? "")
+                      : "—"}
+                  </Text>
                 </View>
                 <View style={[s.infoRow, s.infoRowLast]}>
                   <Text style={s.infoRowLabel}>Network</Text>
-                  <Text style={s.infoRowValue}>{CHAIN_NAME} (Chain {CHAIN_ID_DEC})</Text>
+                  <Text style={s.infoRowValue}>
+                    {connectReq?.network === "solana"
+                      ? "Solana Mainnet"
+                      : `${activeNetwork.name} (Chain ${activeNetwork.chainId})`}
+                  </Text>
                 </View>
               </View>
 
@@ -1084,7 +1397,7 @@ export default function DAppScreen() {
                 </View>
                 <View style={[s.infoRow, s.infoRowLast]}>
                   <Text style={s.infoRowLabel}>Network</Text>
-                  <Text style={s.infoRowValue}>{CHAIN_NAME}</Text>
+                  <Text style={s.infoRowValue}>{activeNetwork.name}</Text>
                 </View>
               </View>
 
