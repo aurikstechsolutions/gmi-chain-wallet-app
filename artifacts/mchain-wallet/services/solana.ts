@@ -15,8 +15,38 @@ import { hexToBytes } from "./crypto";
 
 export const SOLANA_RPC_URL = "https://api.mainnet-beta.solana.com";
 export const SOLANA_NATIVE_DECIMALS = 9;
+const SOLANA_FALLBACK_RPC_URL = "https://solana-rpc.publicnode.com";
 
 const connection = new Connection(SOLANA_RPC_URL, "confirmed");
+const SOLANA_RPC_ENDPOINTS = [SOLANA_RPC_URL, SOLANA_FALLBACK_RPC_URL];
+
+async function withRpcFallback<T>(operation: (rpcUrl: string) => Promise<T>): Promise<T> {
+  let lastError: unknown;
+  for (const rpcUrl of SOLANA_RPC_ENDPOINTS) {
+    try {
+      return await operation(rpcUrl);
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Solana RPC is temporarily unavailable");
+}
+
+async function solanaRpc<T>(rpcUrl: string, method: string, params: unknown[]): Promise<T> {
+  const response = await fetch(rpcUrl, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  const payload = await response.json() as { result?: T; error?: { message?: string; code?: number } };
+  if (!response.ok || payload.error) {
+    throw new Error(payload.error?.message || `Solana RPC request failed (${response.status})`);
+  }
+  if (payload.result === undefined) throw new Error("Solana RPC returned no result");
+  return payload.result;
+}
 
 export type SolanaConnection = Pick<
   Connection,
@@ -76,7 +106,13 @@ export function formatSolanaAmount(raw: bigint, decimals: number): string {
 }
 
 export async function fetchSolanaBalanceRaw(address: string): Promise<bigint> {
-  return BigInt(await connection.getBalance(new PublicKey(address), "confirmed"));
+  const owner = new PublicKey(address).toBase58();
+  const result = await withRpcFallback((rpcUrl) => solanaRpc<{ value: number }>(
+    rpcUrl,
+    "getBalance",
+    [owner, { commitment: "confirmed" }],
+  ));
+  return BigInt(result.value);
 }
 
 export async function fetchSolanaMintDecimals(
@@ -96,11 +132,21 @@ export async function fetchSolanaTokenBalanceRaw(
 ): Promise<bigint> {
   const owner = new PublicKey(ownerAddress);
   const mint = new PublicKey(mintAddress);
-  const tokenAccount = await getAssociatedTokenAddress(mint, owner);
-  const accountInfo = await connection.getAccountInfo(tokenAccount, "confirmed");
-  if (!accountInfo) return 0n;
-  const balance = await connection.getTokenAccountBalance(tokenAccount, "confirmed");
-  return BigInt(balance.value.amount);
+  const accounts = await withRpcFallback((rpcUrl) => solanaRpc<{
+    value: Array<{ account: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }>
+  }>(
+    rpcUrl,
+    "getTokenAccountsByOwner",
+    [
+      owner.toBase58(),
+      { mint: mint.toBase58() },
+      { encoding: "jsonParsed", commitment: "confirmed" },
+    ],
+  ));
+  return accounts.value.reduce((total, account) => {
+    const amount = account.account.data?.parsed?.info?.tokenAmount?.amount;
+    return amount === undefined ? total : total + BigInt(amount);
+  }, 0n);
 }
 
 export async function fetchSolanaTokenBalance(
