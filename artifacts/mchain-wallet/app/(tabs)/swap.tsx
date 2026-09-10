@@ -364,14 +364,16 @@ export default function SwapScreen() {
   const solBalanceQuery = useQuery<bigint>({
     queryKey: ["solanaSwapBalance", solAddress],
     queryFn: () => fetchSolanaBalanceRaw(solAddress!),
-    enabled: mode === "swap" && swapNetwork === "solana" && !!solAddress,
+    enabled: mode === "swap" && swapNetwork === "solana" && solanaSwapDirection === "sol-to-gmi" && !!solAddress,
     staleTime: 15_000,
+    retry: 1,
   });
   const solanaGmiBalanceQuery = useQuery<bigint>({
     queryKey: ["solanaGmiSwapBalance", solAddress],
     queryFn: () => fetchSolanaTokenBalanceRaw(SOLANA_GMI_CONTRACT_ADDRESS, solAddress!),
     enabled: mode === "swap" && swapNetwork === "solana" && solanaSwapDirection === "gmi-to-sol" && !!solAddress,
     staleTime: 15_000,
+    retry: 1,
   });
   const solanaInputDecimals = solanaSwapDirection === "sol-to-gmi" ? 9 : 6;
   const solanaInputSymbol = solanaSwapDirection === "sol-to-gmi" ? "SOL" : "GMI";
