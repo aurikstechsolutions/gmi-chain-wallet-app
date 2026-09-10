@@ -25,6 +25,19 @@ import {
   mxcAddressToEthAddress,
   parseUnits,
 } from "@/services/crypto";
+import {
+  fetchSolanaBalanceRaw,
+  fetchSolanaTokenBalanceRaw,
+  formatSolanaAmount,
+  parseSolanaAmount,
+} from "@/services/solana";
+import {
+  executeRaydiumSwap,
+  fetchRaydiumGmiToSolQuote,
+  fetchRaydiumSolToGmiQuote,
+  type RaydiumSwapQuote,
+} from "@/services/raydium";
+import { SOLANA_GMI_CONTRACT_ADDRESS } from "@/services/solanaAssets";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import React, { useMemo, useState } from "react";
@@ -198,6 +211,11 @@ function stylesFor(colors: ReturnType<typeof useColors>) {
     modeTabSelected: { backgroundColor: colors.card, shadowColor: colors.foreground, shadowOpacity: 0.06, shadowRadius: 6, shadowOffset: { width: 0, height: 2 }, elevation: 1 },
     modeTabText: { fontSize: 13, fontFamily: "Inter_600SemiBold", color: colors.mutedForeground },
     modeTabTextSelected: { color: colors.foreground },
+     networkTabs: { flexDirection: "row", padding: 3, marginBottom: 14, backgroundColor: colors.secondary, borderRadius: 12, borderWidth: 1, borderColor: colors.border },
+     networkTab: { flex: 1, minHeight: 36, alignItems: "center", justifyContent: "center", borderRadius: 9 },
+     networkTabSelected: { backgroundColor: colors.card },
+     networkTabText: { fontSize: 11, fontFamily: "Inter_700Bold", color: colors.mutedForeground },
+     networkTabTextSelected: { color: colors.foreground },
     formCard: { padding: 16, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: colors.radius + 2 },
     amountBox: { borderRadius: colors.radius - 2, borderWidth: 1, padding: 14 },
     amountHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
@@ -273,11 +291,14 @@ export default function SwapScreen() {
   const s = stylesFor(colors);
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
-  const { activeWallet, getPrivateKey } = useWallet();
+  const { activeWallet, solAddress, getPrivateKey } = useWallet();
   const { mode: requestedMode } = useLocalSearchParams<{ mode?: string }>();
   const [mode, setMode] = useState<TradeMode>("swap");
   const [liquidityMode, setLiquidityMode] = useState<LiquidityMode>("add");
+  const [swapNetwork, setSwapNetwork] = useState<"gmi" | "solana">("gmi");
+  const [solanaSwapDirection, setSolanaSwapDirection] = useState<"sol-to-gmi" | "gmi-to-sol">("sol-to-gmi");
   const [swapAmount, setSwapAmount] = useState("");
+  const [solAmount, setSolAmount] = useState("");
   const [bridgeAmount, setBridgeAmount] = useState("");
   const [slippage, setSlippage] = useState("0.50");
   const [fromTokenId, setFromTokenId] = useState<string | null>(null);
@@ -288,6 +309,9 @@ export default function SwapScreen() {
   const [ammAction, setAmmAction] = useState<AmmAction>("idle");
   const [ammError, setAmmError] = useState<string | null>(null);
   const [ammTxHash, setAmmTxHash] = useState<string | null>(null);
+  const [solanaAction, setSolanaAction] = useState<AmmAction>("idle");
+  const [solanaError, setSolanaError] = useState<string | null>(null);
+  const [solanaTxHash, setSolanaTxHash] = useState<string | null>(null);
   const [bridgeSource, setBridgeSource] = useState<BridgeChain>("gmi");
   const [destinationAddress, setDestinationAddress] = useState("");
   const [bridgeStatus, setBridgeStatus] = useState<BridgeTransferStatus | null>(null);
@@ -327,15 +351,55 @@ export default function SwapScreen() {
   const { data: ammConfig, isLoading: ammLoading, isError: ammIsError } = useQuery<AmmPublicConfig>({
     queryKey: ["ammConfig"],
     queryFn: api.getAmmConfig,
-    enabled: mode === "swap",
+    enabled: mode === "swap" && swapNetwork === "gmi",
     staleTime: 30_000,
   });
   const { data: snapshot, dataUpdatedAt: snapshotUpdatedAt, isLoading: snapshotLoading, isError: snapshotIsError, refetch: refetchSnapshot } = useQuery<AmmSnapshot>({
     queryKey: ["ammSnapshot", activeWallet?.id, ammConfig?.pairs[0]?.pairAddress],
     queryFn: () => getAmmSnapshot(ammConfig!, activeWallet!.ethAddress),
-    enabled: mode === "swap" && !!activeWallet && !!ammConfig?.enabled && !!ammConfig.pairs[0],
+    enabled: mode === "swap" && swapNetwork === "gmi" && !!activeWallet && !!ammConfig?.enabled && !!ammConfig.pairs[0],
     refetchInterval: 20_000,
     staleTime: 10_000,
+  });
+  const solBalanceQuery = useQuery<bigint>({
+    queryKey: ["solanaSwapBalance", solAddress],
+    queryFn: () => fetchSolanaBalanceRaw(solAddress!),
+    enabled: mode === "swap" && swapNetwork === "solana" && !!solAddress,
+    staleTime: 15_000,
+  });
+  const solanaGmiBalanceQuery = useQuery<bigint>({
+    queryKey: ["solanaGmiSwapBalance", solAddress],
+    queryFn: () => fetchSolanaTokenBalanceRaw(SOLANA_GMI_CONTRACT_ADDRESS, solAddress!),
+    enabled: mode === "swap" && swapNetwork === "solana" && solanaSwapDirection === "gmi-to-sol" && !!solAddress,
+    staleTime: 15_000,
+  });
+  const solanaInputDecimals = solanaSwapDirection === "sol-to-gmi" ? 9 : 6;
+  const solanaInputSymbol = solanaSwapDirection === "sol-to-gmi" ? "SOL" : "GMI";
+  const solanaOutputSymbol = solanaSwapDirection === "sol-to-gmi" ? "GMI" : "SOL";
+  const solanaInputBalanceQuery = solanaSwapDirection === "sol-to-gmi" ? solBalanceQuery : solanaGmiBalanceQuery;
+  const solInputState = useMemo<{ raw?: bigint; error?: string }>(() => {
+    if (!solAmount.trim()) return {};
+    try {
+      const raw = parseSolanaAmount(solAmount, solanaInputDecimals);
+      if (solanaInputBalanceQuery.data !== undefined && raw > solanaInputBalanceQuery.data) {
+        return { error: `Insufficient ${solanaInputSymbol} balance` };
+      }
+      return { raw };
+    } catch (error) {
+      return { error: error instanceof Error ? error.message : "Enter a valid SOL amount" };
+    }
+  }, [solAmount, solanaInputBalanceQuery.data, solanaInputDecimals, solanaInputSymbol]);
+  const solQuoteQuery = useQuery<RaydiumSwapQuote>({
+    queryKey: ["raydiumSolanaQuote", solanaSwapDirection, solInputState.raw ? solInputState.raw.toString() : null, slippage],
+    queryFn: () => {
+      if (!solInputState.raw) throw new Error(`Enter a valid ${solanaInputSymbol} amount`);
+      return solanaSwapDirection === "sol-to-gmi"
+        ? fetchRaydiumSolToGmiQuote(solInputState.raw, Math.round(Number(slippage) * 100))
+        : fetchRaydiumGmiToSolQuote(solInputState.raw, Math.round(Number(slippage) * 100));
+    },
+    enabled: mode === "swap" && swapNetwork === "solana" && !!solInputState.raw && !solInputState.error,
+    staleTime: 10_000,
+    refetchInterval: 15_000,
   });
 
   React.useEffect(() => {
@@ -484,6 +548,34 @@ export default function SwapScreen() {
     } catch (error) {
       setAmmAction("error");
       setAmmError(error instanceof Error ? error.message : "Swap failed. Try again.");
+    }
+  }
+
+  async function submitSolanaSwap() {
+    if (!activeWallet || !solAddress || !solInputState.raw || !solQuoteQuery.data) return;
+    if (solQuoteQuery.isFetching) return;
+    try {
+      if (solanaInputBalanceQuery.data !== undefined && solInputState.raw > solanaInputBalanceQuery.data) {
+        throw new Error(`Insufficient ${solanaInputSymbol} balance`);
+      }
+      setSolanaAction("signing");
+      setSolanaError(null);
+      setSolanaTxHash(null);
+      const privateKey = await getPrivateKey(activeWallet.id);
+      if (!privateKey) throw new Error("This wallet needs to be unlocked before signing.");
+      const result = await executeRaydiumSwap(
+        privateKey,
+        solAddress,
+        solQuoteQuery.data,
+      );
+      setSolanaTxHash(result.signatures[result.signatures.length - 1] ?? null);
+      setSolanaAction("success");
+      await queryClient.invalidateQueries({ queryKey: ["solanaSwapBalance", solAddress] });
+      await queryClient.invalidateQueries({ queryKey: ["solanaGmiSwapBalance", solAddress] });
+      await queryClient.invalidateQueries({ queryKey: ["solanaBalance"] });
+    } catch (error) {
+      setSolanaAction("error");
+      setSolanaError(error instanceof Error ? error.message : "Solana swap failed. Try again.");
     }
   }
 
@@ -653,6 +745,102 @@ export default function SwapScreen() {
     } finally { setBridgeSubmitting(false); }
   }
 
+  function renderSolanaSwap() {
+    const isSolToGmi = solanaSwapDirection === "sol-to-gmi";
+    const inputBalanceRaw = solanaInputBalanceQuery.data ?? 0n;
+    const inputBalance = formatSolanaAmount(inputBalanceRaw, solanaInputDecimals);
+    const outputDecimals = isSolToGmi ? 6 : 9;
+    const raydiumQuote = solQuoteQuery.data;
+    const solActionBusy = ["approving", "signing", "pending"].includes(solanaAction);
+    const validSolSlippage = Number.isFinite(Number(slippage)) && Number(slippage) >= 0 && Number(slippage) <= 20;
+    const solSwapReady = !!activeWallet && !!solAddress && !!solInputState.raw && !solInputState.error
+      && !!raydiumQuote && !solQuoteQuery.isFetching && validSolSlippage && !solActionBusy;
+    const rate = raydiumQuote && raydiumQuote.inputAmount > 0n
+      ? (Number(raydiumQuote.outputAmount) / (10 ** outputDecimals)) / (Number(raydiumQuote.inputAmount) / (10 ** solanaInputDecimals))
+      : 0;
+
+    if (!activeWallet || !solAddress) {
+      return <View style={s.formCard}><Notice icon="wallet-outline" tone="warning" colors={colors}>Connect a wallet with a Solana address to swap SOL on Raydium.</Notice></View>;
+    }
+
+    return (
+      <View style={s.formCard}>
+        <View style={s.intro}>
+          <View style={s.introIcon}><Icon name="flash-outline" size={19} color={colors.primary} /></View>
+          <View style={s.introCopy}>
+            <Text style={s.introTitle}>{isSolToGmi ? "SOL → GMI on Raydium" : "GMI → SOL on Raydium"}</Text>
+            <Text style={s.introText}>A live Solana route using the existing Raydium SOL/GMI pool.</Text>
+          </View>
+          <TouchableOpacity onPress={() => {
+            void solanaInputBalanceQuery.refetch();
+            if (solInputState.raw && !solInputState.error) void solQuoteQuery.refetch();
+          }} accessibilityRole="button" accessibilityLabel="Refresh Raydium quote">
+            <Icon name="refresh-outline" size={18} color={colors.mutedForeground} />
+          </TouchableOpacity>
+        </View>
+        <AmountField
+          label="You send"
+          asset={isSolToGmi
+            ? { id: "solana-native", symbol: "SOL", name: "Solana", networkLabel: "Solana" }
+            : { id: "solana-gmi", symbol: "GMI", name: "GMI Token", networkLabel: "Solana" }}
+          amount={solAmount}
+          placeholder="0.00"
+          available={solanaInputBalanceQuery.isLoading ? "Loading…" : inputBalance}
+          onChange={(value) => { setSolAmount(value); setSolanaAction("idle"); setSolanaError(null); }}
+          onMax={() => setSolAmount(inputBalance)}
+          colors={colors}
+        />
+        <View style={s.switchRow}>
+          <View style={s.divider} />
+          <TouchableOpacity
+            style={s.switchButton}
+            onPress={() => {
+              setSolanaSwapDirection((current) => current === "sol-to-gmi" ? "gmi-to-sol" : "sol-to-gmi");
+              setSolAmount("");
+              setSolanaAction("idle");
+              setSolanaError(null);
+              setSolanaTxHash(null);
+            }}
+            activeOpacity={0.75}
+            accessibilityRole="button"
+            accessibilityLabel="Switch Solana swap direction"
+          >
+            <Icon name={isSolToGmi ? "arrow-down" : "arrow-up"} size={17} color={colors.primary} />
+          </TouchableOpacity>
+          <View style={s.divider} />
+        </View>
+        <AmountField
+          label="You receive"
+          asset={isSolToGmi
+            ? { id: "solana-gmi", symbol: "GMI", name: "GMI Token", networkLabel: "Solana" }
+            : { id: "solana-native", symbol: "SOL", name: "Solana", networkLabel: "Solana" }}
+          amount={raydiumQuote ? formatSolanaAmount(raydiumQuote.outputAmount, outputDecimals) : ""}
+          placeholder="—"
+          colors={colors}
+        />
+        {solInputState.error && solAmount.length > 0 ? <Notice icon="alert-triangle" tone="warning" colors={colors}>{solInputState.error}</Notice> : null}
+        {solanaInputBalanceQuery.isError ? <Notice icon="wifi-outline" tone="error" colors={colors}>Could not read your {solanaInputSymbol} balance. Refresh and try again.</Notice> : null}
+        {solAmount.trim().length > 0 && solQuoteQuery.isError ? <Notice icon="wifi-outline" tone="error" colors={colors}>{solQuoteQuery.error instanceof Error ? solQuoteQuery.error.message : "Raydium quote unavailable"}</Notice> : null}
+        <View style={s.detailCard}>
+          <View style={s.detailRow}><Text style={s.detailLabel}>Rate</Text><Text style={s.detailValue}>{rate > 0 ? `1 ${solanaInputSymbol} ≈ ${rate.toLocaleString("en-US", { maximumFractionDigits: 6 })} ${solanaOutputSymbol}` : "—"}</Text></View>
+          <View style={s.detailRow}><Text style={s.detailLabel}>Minimum received</Text><Text style={s.detailValue}>{raydiumQuote ? `${formatSolanaAmount(raydiumQuote.minimumOutputAmount, outputDecimals)} ${solanaOutputSymbol}` : "—"}</Text></View>
+          <View style={s.detailRow}><Text style={s.detailLabel}>Price impact</Text><Text style={s.detailValue}>{raydiumQuote ? `${raydiumQuote.priceImpactPct.toFixed(2)}%` : "—"}</Text></View>
+          <View style={s.detailRow}><Text style={s.detailLabel}>Route</Text><Text style={s.detailValue}>Raydium CPMM</Text></View>
+          <View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
+        </View>
+        {solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
+        {solanaError ? <Notice icon="alert-circle" tone="error" colors={colors}>{solanaError}</Notice> : null}
+        {solanaAction === "success" ? <Notice icon="checkmark-circle" tone="success" colors={colors}>Swap confirmed{solanaTxHash ? ` · ${shortenHash(solanaTxHash)}` : ""}.</Notice> : null}
+        <TouchableOpacity style={[s.primaryButton, solSwapReady && s.primaryButtonReady]} disabled={!solSwapReady} onPress={() => void submitSolanaSwap()} activeOpacity={0.82}>
+          <Text style={[s.primaryButtonText, solSwapReady && s.primaryButtonTextReady]}>
+            {!solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Confirming on Solana…" : "Review & swap"}
+          </Text>
+        </TouchableOpacity>
+        <Text style={s.helperText}>Your wallet signs locally. Review the Raydium route and minimum received amount before signing.</Text>
+      </View>
+    );
+  }
+
   function selectMode(nextMode: TradeMode) {
     setMode(nextMode);
     if (nextMode === "swap") resetAmmStatus();
@@ -697,7 +885,30 @@ export default function SwapScreen() {
 
         {mode === "swap" ? (
           <>
-            {ammState ? <View style={s.formCard}>{ammState}</View> : (
+            <View style={s.networkTabs} accessibilityRole="tablist">
+              {(["gmi", "solana"] as const).map((network) => {
+                const selected = swapNetwork === network;
+                return (
+                  <TouchableOpacity
+                    key={network}
+                    style={[s.networkTab, selected && s.networkTabSelected]}
+                    onPress={() => {
+                      setSwapNetwork(network);
+                      setAmmError(null);
+                      setSolanaError(null);
+                    }}
+                    activeOpacity={0.8}
+                    accessibilityRole="tab"
+                    accessibilityState={{ selected }}
+                  >
+                    <Text style={[s.networkTabText, selected && s.networkTabTextSelected]}>
+                      {network === "gmi" ? "GMI Chain · AMM" : "Solana · Raydium"}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+            {swapNetwork === "solana" ? renderSolanaSwap() : ammState ? <View style={s.formCard}>{ammState}</View> : (
               <View style={s.formCard}>
                 <View style={s.intro}>
                   <View style={s.introIcon}><Icon name="repeat-outline" size={19} color={colors.primary} /></View>
