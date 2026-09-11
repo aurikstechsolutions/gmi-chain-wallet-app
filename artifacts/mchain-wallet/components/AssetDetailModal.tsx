@@ -5,6 +5,7 @@ import { useColors } from "@/hooks/useColors";
 import { api, type Transaction } from "@/services/api";
 import { ethAddressToMxc, mxcAddressToEthAddress, shortenAddress } from "@/services/crypto";
 import { fetchBscTxHistory, type BscApiTx, type CustomToken, type DefaultAsset } from "@/services/tokens";
+import { fetchSolanaTxHistory, type SolanaHistoryEntry } from "@/services/solana";
 import { GMI_NATIVE_SYMBOL } from "@/services/chain";
 import * as Clipboard from "expo-clipboard";
 import * as Haptics from "expo-haptics";
@@ -133,12 +134,39 @@ function normalizeBscTx(tx: BscApiTx, symbol: string, decimals: number): Normali
     amountRaw: tx.value,
     symbol,
     decimals,
-    dateStr: new Date(Number(tx.timeStamp) * 1000).toLocaleDateString(undefined, {
-      month: "short", day: "numeric",
-      hour: "2-digit", minute: "2-digit",
-    }),
+    dateStr: Number(tx.timeStamp) > 0
+      ? new Date(Number(tx.timeStamp) * 1000).toLocaleDateString(undefined, {
+          month: "short", day: "numeric",
+          hour: "2-digit", minute: "2-digit",
+        })
+      : "—",
     blockHeight: Number(tx.blockNumber),
     status: tx.isError === "0" ? "confirmed" : "failed",
+  };
+}
+
+function normalizeSolanaTx(
+  tx: SolanaHistoryEntry,
+  symbol: string,
+  decimals: number,
+): NormalizedTx {
+  return {
+    hash: tx.signature,
+    fromEth: tx.fromAddress,
+    toEth: tx.toAddress,
+    fromMxc: "",
+    toMxc: "",
+    amountRaw: tx.amountRaw,
+    symbol,
+    decimals,
+    dateStr: tx.blockTime
+      ? new Date(tx.blockTime * 1000).toLocaleDateString(undefined, {
+          month: "short", day: "numeric",
+          hour: "2-digit", minute: "2-digit",
+        })
+      : "—",
+    blockHeight: tx.slot,
+    status: tx.status,
   };
 }
 
@@ -488,7 +516,15 @@ export function AssetDetailModal({
     refetchInterval: 60_000,
   });
 
-  const isLoading = isTokenLike ? tokenLoading : isBscAsset ? bscLoading : isSolanaAsset ? false : nativeLoading;
+  const { data: solanaData, isLoading: solanaLoading } = useQuery({
+    queryKey: ["solanaTxHistory", asset?.address, contractAddr],
+    queryFn: () => fetchSolanaTxHistory(asset!.address, contractAddr || undefined),
+    enabled: !!asset?.address && visible && isSolanaAsset,
+    staleTime: 30_000,
+    refetchInterval: 60_000,
+  });
+
+  const isLoading = isTokenLike ? tokenLoading : isBscAsset ? bscLoading : isSolanaAsset ? solanaLoading : nativeLoading;
 
   // Normalize all entries to the same display format
   const allEntries: NormalizedTx[] = isTokenLike
@@ -496,7 +532,7 @@ export function AssetDetailModal({
     : isBscAsset
       ? (bscData ?? []).map((t) => normalizeBscTx(t, tokenSymbol, tokenDecimals))
       : isSolanaAsset
-        ? []
+        ? (solanaData ?? []).map((t) => normalizeSolanaTx(t, tokenSymbol, tokenDecimals))
       : (nativeData?.transactions ?? []).map(normalizeNative);
 
   // All EVM assets (tokens + MChain defaults + BSC assets) match by ETH address.
@@ -504,7 +540,7 @@ export function AssetDetailModal({
   const myEthAddress = ethAddr.toLowerCase();
 
   const filtered = allEntries.filter((e) => {
-    if (isTokenLike || isBscAsset) {
+    if (isTokenLike || isBscAsset || isSolanaAsset) {
       const from = e.fromEth.toLowerCase();
       const to   = e.toEth.toLowerCase();
       if (filter === "send")    return from === myEthAddress && to !== myEthAddress;

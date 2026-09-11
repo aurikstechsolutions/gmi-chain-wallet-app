@@ -155,6 +155,9 @@ for (const asset of DEFAULT_ASSETS) {
 
 // ─── BSCScan API (tx history) ─────────────────────────────────────────────────
 const BSCSCAN_API = "https://api.bscscan.com/api";
+const BSC_HISTORY_RPC = "https://bsc.publicnode.com";
+const ERC20_TRANSFER_TOPIC =
+  "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a9df523b3ef";
 
 export interface BscApiTx {
   hash: string;
@@ -164,6 +167,123 @@ export interface BscApiTx {
   timeStamp: string;
   isError: string;
   blockNumber: string;
+}
+
+type BscRpcLog = {
+  transactionHash: string;
+  blockNumber: string;
+  topics: string[];
+  data: string;
+};
+
+async function bscHistoryRpc<T>(method: string, params: unknown[]): Promise<T> {
+  const response = await fetch(BSC_HISTORY_RPC, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }),
+  });
+  if (!response.ok) throw new Error(`BNB history RPC failed (${response.status})`);
+  const body = await response.json() as { result?: T; error?: { message?: string } };
+  if (body.error || body.result === undefined) {
+    throw new Error(body.error?.message || "BNB history RPC returned no result");
+  }
+  return body.result;
+}
+
+function addressTopic(address: string): string {
+  return `0x${address.toLowerCase().replace(/^0x/, "").padStart(64, "0")}`;
+}
+
+function decodeTopicAddress(topic: string | undefined): string {
+  return topic ? `0x${topic.slice(-40)}` : "";
+}
+
+function decodeHexUint(value: string): string {
+  try {
+    return BigInt(value || "0x0").toString();
+  } catch {
+    return "0";
+  }
+}
+
+async function fetchBscTokenHistoryFromRpc(
+  ethAddress: string,
+  contractAddress: string,
+): Promise<BscApiTx[]> {
+  const latestHex = await bscHistoryRpc<string>("eth_blockNumber", []);
+  const latest = Number(BigInt(latestHex));
+  // Public BSC RPCs do not expose an address-indexed history endpoint. Filter
+  // Transfer logs server-side over a recent window instead of returning the
+  // empty result from the deprecated BscScan v1 endpoint.
+  const fromBlock = Math.max(0, latest - 100_000);
+  const address = addressTopic(ethAddress);
+  const [sent, received] = await Promise.all([
+    bscHistoryRpc<BscRpcLog[]>("eth_getLogs", [{
+      address: contractAddress,
+      fromBlock: `0x${fromBlock.toString(16)}`,
+      toBlock: latestHex,
+      topics: [ERC20_TRANSFER_TOPIC, address],
+    }]),
+    bscHistoryRpc<BscRpcLog[]>("eth_getLogs", [{
+      address: contractAddress,
+      fromBlock: `0x${fromBlock.toString(16)}`,
+      toBlock: latestHex,
+      topics: [ERC20_TRANSFER_TOPIC, null, address],
+    }]),
+  ]);
+  const seen = new Set<string>();
+  return [...sent, ...received]
+    .filter((log) => {
+      if (!log.transactionHash || seen.has(log.transactionHash)) return false;
+      seen.add(log.transactionHash);
+      return true;
+    })
+    .sort((a, b) => Number(BigInt(b.blockNumber) - BigInt(a.blockNumber)))
+    .map((log) => ({
+      hash: log.transactionHash,
+      from: decodeTopicAddress(log.topics[1]),
+      to: decodeTopicAddress(log.topics[2]),
+      value: decodeHexUint(log.data),
+      timeStamp: "0",
+      isError: "0",
+      blockNumber: String(Number(BigInt(log.blockNumber))),
+    }));
+}
+
+async function fetchBscNativeHistoryFromRpc(ethAddress: string): Promise<BscApiTx[]> {
+  const latestHex = await bscHistoryRpc<string>("eth_blockNumber", []);
+  const latest = Number(BigInt(latestHex));
+  const address = ethAddress.toLowerCase();
+  const blockNumbers = Array.from({ length: 120 }, (_, index) => latest - index);
+  const blocks = await Promise.all(
+    blockNumbers.map((blockNumber) =>
+      bscHistoryRpc<{
+        number: string;
+        timestamp: string;
+        transactions: Array<{ hash: string; from: string; to: string | null; value: string }>;
+      } | null>("eth_getBlockByNumber", [`0x${blockNumber.toString(16)}`, true]),
+    ),
+  );
+  return blocks
+    .flatMap((block) => {
+      if (!block) return [];
+      return block.transactions
+        .filter((transaction) => {
+          const from = transaction.from?.toLowerCase();
+          const to = transaction.to?.toLowerCase();
+          return from === address || to === address;
+        })
+        .map((transaction) => ({
+          hash: transaction.hash,
+          from: transaction.from,
+          to: transaction.to ?? "",
+          value: decodeHexUint(transaction.value),
+          timeStamp: String(Number(BigInt(block.timestamp))),
+          isError: "0",
+          blockNumber: String(Number(BigInt(block.number))),
+        }));
+    })
+    .sort((a, b) => Number(BigInt(b.blockNumber) - BigInt(a.blockNumber)));
 }
 
 /**
@@ -188,8 +308,14 @@ export async function fetchBscTxHistory(
   try {
     const res = await fetch(`${BSCSCAN_API}?${params}`);
     const json = (await res.json()) as { status: string; result: BscApiTx[] | string };
-    if (json.status !== "1" || !Array.isArray(json.result)) return [];
-    return json.result;
+    if (json.status === "1" && Array.isArray(json.result)) return json.result;
+  } catch {
+    // Fall through to the RPC indexer below.
+  }
+  try {
+    return contractAddress
+      ? await fetchBscTokenHistoryFromRpc(ethAddress, contractAddress)
+      : await fetchBscNativeHistoryFromRpc(ethAddress);
   } catch {
     return [];
   }

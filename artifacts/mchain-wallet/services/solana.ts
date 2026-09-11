@@ -162,6 +162,177 @@ export async function fetchSolanaTokenBalance(
   return balance.value.uiAmountString ?? "0";
 }
 
+export interface SolanaHistoryEntry {
+  signature: string;
+  slot: number;
+  blockTime: number | null;
+  fromAddress: string;
+  toAddress: string;
+  amountRaw: string;
+  mintAddress?: string;
+  status: "confirmed" | "failed";
+}
+
+type ParsedSolanaInstruction = {
+  program?: string;
+  parsed?: {
+    type?: string;
+    info?: {
+      source?: string;
+      destination?: string;
+      authority?: string;
+      owner?: string;
+      mint?: string;
+      lamports?: number;
+      amount?: string;
+      tokenAmount?: { amount?: string };
+    };
+  };
+};
+
+function parsedInstructions(transaction: any): ParsedSolanaInstruction[] {
+  const topLevel = transaction?.transaction?.message?.instructions ?? [];
+  const inner = (transaction?.meta?.innerInstructions ?? []).flatMap(
+    (group: { instructions?: ParsedSolanaInstruction[] }) => group.instructions ?? [],
+  );
+  return [...topLevel, ...inner];
+}
+
+/**
+ * Reads wallet-directed native SOL or SPL transfers from confirmed parsed
+ * transactions. Solana RPC does not provide an address-indexed history API,
+ * so signatures are fetched first and the transaction instructions are
+ * filtered locally.
+ */
+export async function fetchSolanaTxHistory(
+  ownerAddress: string,
+  mintAddress?: string,
+): Promise<SolanaHistoryEntry[]> {
+  const owner = new PublicKey(ownerAddress).toBase58();
+  const mint = mintAddress ? new PublicKey(mintAddress).toBase58() : undefined;
+  const ownedTokenAccounts = new Set<string>();
+
+  if (mint) {
+    const accounts = await withRpcFallback((rpcUrl) => solanaRpc<{
+      value: Array<{ pubkey: string }>
+    }>(
+      rpcUrl,
+      "getTokenAccountsByOwner",
+      [
+        owner,
+        { mint },
+        { encoding: "jsonParsed", commitment: "confirmed" },
+      ],
+    ));
+    for (const account of accounts.value) ownedTokenAccounts.add(account.pubkey);
+  }
+
+  const signatures = await withRpcFallback((rpcUrl) => solanaRpc<Array<{
+    signature: string;
+    slot: number;
+    blockTime: number | null;
+    err: unknown;
+  }>>(
+    rpcUrl,
+    "getSignaturesForAddress",
+    [owner, { limit: 50, commitment: "confirmed" }],
+  ));
+  if (signatures.length === 0) return [];
+
+  const transactions: Array<any | null> = [];
+  for (let offset = 0; offset < signatures.length; offset += 8) {
+    const batch = signatures.slice(offset, offset + 8);
+    const parsedBatch = await Promise.all(
+      batch.map((entry) =>
+        withRpcFallback((rpcUrl) => solanaRpc<any | null>(
+          rpcUrl,
+          "getTransaction",
+          [
+            entry.signature,
+            { encoding: "jsonParsed", commitment: "confirmed", maxSupportedTransactionVersion: 0 },
+          ],
+        )),
+      ),
+    );
+    transactions.push(...parsedBatch);
+  }
+
+  const results: SolanaHistoryEntry[] = [];
+  const seen = new Set<string>();
+  for (let index = 0; index < signatures.length; index += 1) {
+    const signature = signatures[index];
+    const transaction = transactions?.[index];
+    if (!transaction) continue;
+    const accountKeys = (transaction.transaction?.message?.accountKeys ?? []).map(
+      (account: { pubkey?: string } | string) =>
+        typeof account === "string" ? account : account.pubkey ?? "",
+    );
+    const tokenMintsByAccount = new Map<string, string>();
+    for (const balance of [
+      ...(transaction.meta?.preTokenBalances ?? []),
+      ...(transaction.meta?.postTokenBalances ?? []),
+    ]) {
+      const account = accountKeys[balance.accountIndex];
+      if (account && balance.mint) tokenMintsByAccount.set(account, balance.mint);
+    }
+    for (const instruction of parsedInstructions(transaction)) {
+      const parsed = instruction.parsed;
+      const info = parsed?.info;
+      if (!parsed || !info) continue;
+
+      if (!mint && instruction.program === "system" && parsed.type === "transfer") {
+        const source = info.source ?? "";
+        const destination = info.destination ?? "";
+        if (source !== owner && destination !== owner) continue;
+        const key = `${signature.signature}:sol:${source}:${destination}:${info.lamports ?? 0}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({
+          signature: signature.signature,
+          slot: signature.slot,
+          blockTime: signature.blockTime,
+          fromAddress: source,
+          toAddress: destination,
+          amountRaw: String(info.lamports ?? 0),
+          status: signature.err ? "failed" : "confirmed",
+        });
+      }
+
+      if (
+        mint &&
+        instruction.program === "spl-token" &&
+        (parsed.type === "transfer" || parsed.type === "transferChecked")
+      ) {
+        const source = info.source ?? "";
+        const destination = info.destination ?? "";
+        const instructionMint =
+          info.mint ??
+          tokenMintsByAccount.get(source) ??
+          tokenMintsByAccount.get(destination);
+        if (instructionMint !== mint) continue;
+        const isSender = source === owner || ownedTokenAccounts.has(source) || info.authority === owner;
+        const isReceiver = destination === owner || ownedTokenAccounts.has(destination);
+        if (!isSender && !isReceiver) continue;
+        const amount = info.tokenAmount?.amount ?? info.amount ?? "0";
+        const key = `${signature.signature}:token:${source}:${destination}:${amount}`;
+        if (seen.has(key)) continue;
+        seen.add(key);
+        results.push({
+          signature: signature.signature,
+          slot: signature.slot,
+          blockTime: signature.blockTime,
+          fromAddress: isSender ? owner : source,
+          toAddress: isReceiver ? owner : destination,
+          amountRaw: amount,
+          mintAddress: mint,
+          status: signature.err ? "failed" : "confirmed",
+        });
+      }
+    }
+  }
+  return results;
+}
+
 async function sendTransaction(
   transaction: Transaction,
   signer: Keypair,

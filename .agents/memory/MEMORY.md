@@ -10,3 +10,4 @@
 - [BSC transfer quotes](bsc-transfer-quotes.md) — Quote chain-56 nonce, gas price, and exact gas before confirmation; sign only the reviewed, still-current parameters.
 - [Raydium Trade API payloads](raydium-trade-api.md) — Preserve the full compute quote envelope; transaction responses contain `{ transaction: base64 }` objects.
 - [Raydium recovery storage](raydium-recovery-storage.md) — Persist resumable transaction batches in durable general storage; platform key stores may reject larger serialized batches.
+- [Solana history RPC](solana-history-rpc.md) — The configured public Solana endpoint supports parsed data through getTransaction(jsonParsed), not parsed-specific or batch transaction methods.
