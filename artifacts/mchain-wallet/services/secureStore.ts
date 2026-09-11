@@ -11,6 +11,7 @@
  */
 import { Platform } from "react-native";
 import * as NativeSecureStore from "expo-secure-store";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 export async function getItemAsync(key: string): Promise<string | null> {
   if (Platform.OS === "web") {
@@ -33,4 +34,26 @@ export async function deleteItemAsync(key: string): Promise<void> {
     return;
   }
   return NativeSecureStore.deleteItemAsync(key);
+}
+
+/**
+ * Swap recovery records contain serialized Raydium transaction batches, which
+ * can be larger than the platform keychain value limit. They are not private
+ * keys, so keep them in the app's durable general-purpose storage instead of
+ * SecureStore.
+ */
+export async function getPersistentItemAsync(key: string): Promise<string | null> {
+  try {
+    return await AsyncStorage.getItem(key);
+  } catch {
+    return null;
+  }
+}
+
+export async function setPersistentItemAsync(key: string, value: string): Promise<void> {
+  await AsyncStorage.setItem(key, value);
+}
+
+export async function deletePersistentItemAsync(key: string): Promise<void> {
+  await AsyncStorage.removeItem(key);
 }

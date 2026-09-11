@@ -35,8 +35,19 @@ import {
   executeRaydiumSwap,
   fetchRaydiumGmiToSolQuote,
   fetchRaydiumSolToGmiQuote,
+  RaydiumSwapError,
+  restoreRaydiumQuote,
+  snapshotRaydiumQuote,
+  type RaydiumSwapRecovery,
+  type RaydiumSwapProgress,
   type RaydiumSwapQuote,
 } from "@/services/raydium";
+import {
+  deletePersistentItemAsync,
+  getPersistentItemAsync,
+  setPersistentItemAsync,
+} from "@/services/secureStore";
+import { createRaydiumSwapRecoveryStore } from "@/services/raydiumRecovery";
 import { SOLANA_GMI_CONTRACT_ADDRESS } from "@/services/solanaAssets";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -129,6 +140,7 @@ function AmountField({
   onChange,
   onMax,
   onAssetPress,
+  disabled = false,
   colors,
 }: {
   label: string;
@@ -139,6 +151,7 @@ function AmountField({
   onChange?: (value: string) => void;
   onMax?: () => void;
   onAssetPress?: () => void;
+  disabled?: boolean;
   colors: ReturnType<typeof useColors>;
 }) {
   return (
@@ -154,6 +167,7 @@ function AmountField({
           <TextInput
             value={amount}
             onChangeText={onChange}
+            editable={!disabled}
             placeholder={placeholder}
             placeholderTextColor={colors.mutedForeground}
             keyboardType="decimal-pad"
@@ -165,7 +179,7 @@ function AmountField({
             {amount || placeholder}
           </Text>
         )}
-        {onMax ? (
+        {onMax && !disabled ? (
           <TouchableOpacity onPress={onMax} style={styles.maxButton} activeOpacity={0.7} accessibilityRole="button">
             <Text style={[styles.maxText, { color: colors.primary }]}>MAX</Text>
           </TouchableOpacity>
@@ -217,6 +231,14 @@ function stylesFor(colors: ReturnType<typeof useColors>) {
      networkTabText: { fontSize: 11, fontFamily: "Inter_700Bold", color: colors.mutedForeground },
      networkTabTextSelected: { color: colors.foreground },
     formCard: { padding: 16, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: colors.radius + 2 },
+    recoveryCard: { padding: 13, marginBottom: 14, borderRadius: 12, backgroundColor: colors.warning + "10", borderWidth: 1, borderColor: colors.warning + "40" },
+    recoveryTitle: { fontSize: 13, fontFamily: "Inter_700Bold", color: colors.foreground },
+    recoveryText: { fontSize: 11, lineHeight: 16, marginTop: 4, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
+    recoveryActions: { flexDirection: "row", gap: 8, marginTop: 12 },
+    recoveryButton: { flex: 1, minHeight: 40, alignItems: "center", justifyContent: "center", borderRadius: 10, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.card },
+    recoveryButtonPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
+    recoveryButtonText: { fontSize: 12, fontFamily: "Inter_700Bold", color: colors.foreground },
+    recoveryButtonTextPrimary: { color: colors.primaryForeground },
     amountBox: { borderRadius: colors.radius - 2, borderWidth: 1, padding: 14 },
     amountHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
     fieldEyebrow: { fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 1, textTransform: "uppercase" },
@@ -312,6 +334,19 @@ export default function SwapScreen() {
   const [solanaAction, setSolanaAction] = useState<AmmAction>("idle");
   const [solanaError, setSolanaError] = useState<string | null>(null);
   const [solanaTxHash, setSolanaTxHash] = useState<string | null>(null);
+  const [solanaProgress, setSolanaProgress] = useState<RaydiumSwapProgress | null>(null);
+  const [solanaRecovery, setSolanaRecovery] = useState<RaydiumSwapRecovery | null>(null);
+  const [solanaRecoveryLoading, setSolanaRecoveryLoading] = useState(false);
+  const [solanaQuoteOverride, setSolanaQuoteOverride] = useState<RaydiumSwapQuote | null>(null);
+  const recoveryWriteRef = React.useRef(Promise.resolve());
+  const raydiumRecoveryStore = React.useMemo(
+    () => createRaydiumSwapRecoveryStore({
+      get: getPersistentItemAsync,
+      set: setPersistentItemAsync,
+      delete: deletePersistentItemAsync,
+    }),
+    [],
+  );
   const [bridgeSource, setBridgeSource] = useState<BridgeChain>("gmi");
   const [destinationAddress, setDestinationAddress] = useState("");
   const [bridgeStatus, setBridgeStatus] = useState<BridgeTransferStatus | null>(null);
@@ -325,6 +360,38 @@ export default function SwapScreen() {
       setMode("bridge");
     }
   }, [requestedMode]);
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setSolanaProgress(null);
+    setSolanaQuoteOverride(null);
+    setSolanaRecovery(null);
+    setSolanaRecoveryLoading(!!activeWallet);
+    setSolanaAction("idle");
+    setSolanaError(null);
+    setSolanaTxHash(null);
+
+    if (!activeWallet || !activeWallet.solAddress) {
+      setSolanaRecoveryLoading(false);
+      return;
+    }
+    const walletId = activeWallet.id;
+    const walletAddress = activeWallet.solAddress;
+
+    void (async () => {
+      const recovery = await raydiumRecoveryStore.load(walletId, walletAddress);
+      if (cancelled) return;
+      if (recovery) {
+        setSolanaRecovery(recovery);
+        setSwapNetwork("solana");
+      }
+      if (!cancelled) setSolanaRecoveryLoading(false);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWallet?.id, activeWallet?.solAddress, raydiumRecoveryStore]);
 
   const { data: bridgeConfig, isLoading: bridgeConfigLoading, isError: bridgeConfigError, refetch: refetchBridgeConfig } = useQuery<BridgePublicConfig>({
     queryKey: ["bridgeConfig"],
@@ -553,31 +620,104 @@ export default function SwapScreen() {
     }
   }
 
+  function persistSolanaProgress(progress: RaydiumSwapProgress, quote: RaydiumSwapQuote) {
+    if (!activeWallet || !solAddress || !solAmount.trim()) return;
+    const walletId = activeWallet.id;
+    const recovery: RaydiumSwapRecovery = {
+      walletAddress: solAddress,
+      direction: solanaSwapDirection,
+      amount: solAmount,
+      quote: snapshotRaydiumQuote(quote),
+      progress,
+      savedAt: new Date().toISOString(),
+    };
+    recoveryWriteRef.current = recoveryWriteRef.current
+      .catch(() => {})
+      .then(() => raydiumRecoveryStore.save(walletId, recovery));
+    void recoveryWriteRef.current.catch(() => {
+      setSolanaError("Swap progress could not be saved. Keep this screen open until the swap finishes.");
+    });
+  }
+
+  async function clearSolanaRecovery(walletId: string) {
+    await recoveryWriteRef.current.catch(() => {});
+    await raydiumRecoveryStore.clear(walletId);
+  }
+
+  async function resumeStoredSolanaSwap() {
+    if (!solanaRecovery || !activeWallet || solanaRecovery.walletAddress !== solAddress) return;
+    try {
+      const quote = restoreRaydiumQuote(solanaRecovery.quote);
+      setSolanaSwapDirection(solanaRecovery.direction);
+      setSolAmount(solanaRecovery.amount);
+      setSolanaQuoteOverride(quote);
+      setSolanaProgress(solanaRecovery.progress);
+      setSolanaRecovery(null);
+      setSolanaAction("idle");
+      setSolanaError(null);
+      setSolanaTxHash(null);
+    } catch {
+      setSolanaError("This interrupted swap cannot be restored. Dismiss it and request a new quote.");
+    }
+  }
+
+  async function dismissStoredSolanaSwap() {
+    if (!solanaRecovery || !activeWallet) return;
+    try {
+      await clearSolanaRecovery(activeWallet.id);
+      setSolanaRecovery(null);
+      setSolanaError(null);
+    } catch {
+      setSolanaError("The interrupted swap could not be dismissed. Try again.");
+    }
+  }
+
   async function submitSolanaSwap() {
-    if (!activeWallet || !solAddress || !solInputState.raw || !solQuoteQuery.data) return;
-    if (solQuoteQuery.isFetching) return;
+    const raydiumQuote = solanaQuoteOverride ?? solQuoteQuery.data;
+    if (!activeWallet || !solAddress || !solInputState.raw || !raydiumQuote) return;
+    if (!solanaQuoteOverride && solQuoteQuery.isFetching) return;
     try {
       if (solanaInputBalanceQuery.data !== undefined && solInputState.raw > solanaInputBalanceQuery.data) {
         throw new Error(`Insufficient ${solanaInputSymbol} balance`);
       }
       setSolanaAction("signing");
       setSolanaError(null);
-      setSolanaTxHash(null);
+      if (!solanaProgress) setSolanaTxHash(null);
       const privateKey = await getPrivateKey(activeWallet.id);
       if (!privateKey) throw new Error("This wallet needs to be unlocked before signing.");
       const result = await executeRaydiumSwap(
         privateKey,
         solAddress,
-        solQuoteQuery.data,
+        raydiumQuote,
+        {
+          resume: solanaProgress ?? undefined,
+          onProgress: (progress) => {
+            setSolanaProgress(progress);
+            persistSolanaProgress(progress, raydiumQuote);
+          },
+        },
       );
       setSolanaTxHash(result.signatures[result.signatures.length - 1] ?? null);
       setSolanaAction("success");
+      await clearSolanaRecovery(activeWallet.id);
+      setSolanaRecovery(null);
+      setSolanaProgress(null);
+      setSolanaQuoteOverride(null);
       await queryClient.invalidateQueries({ queryKey: ["solanaSwapBalance", solAddress] });
       await queryClient.invalidateQueries({ queryKey: ["solanaGmiSwapBalance", solAddress] });
       await queryClient.invalidateQueries({ queryKey: ["solanaBalance"] });
     } catch (error) {
       setSolanaAction("error");
-      setSolanaError(error instanceof Error ? error.message : "Solana swap failed. Try again.");
+      if (error instanceof RaydiumSwapError) {
+        setSolanaProgress(error.progress);
+        const confirmed = error.progress.transactions.filter((transaction) => transaction.status === "confirmed").length;
+        const total = error.progress.transactions.length;
+        const remaining = total - confirmed;
+        persistSolanaProgress(error.progress, raydiumQuote);
+        setSolanaError(`${error.message} ${confirmed} of ${total} transaction${total === 1 ? "" : "s"} confirmed. Retry will resume with ${remaining} remaining; confirmed transactions will not be sent again.`);
+      } else {
+        setSolanaError(error instanceof Error ? error.message : "Solana swap failed. Try again.");
+      }
     }
   }
 
@@ -752,11 +892,12 @@ export default function SwapScreen() {
     const inputBalanceRaw = solanaInputBalanceQuery.data ?? 0n;
     const inputBalance = formatSolanaAmount(inputBalanceRaw, solanaInputDecimals);
     const outputDecimals = isSolToGmi ? 6 : 9;
-    const raydiumQuote = solQuoteQuery.data;
+    const raydiumQuote = solanaQuoteOverride ?? solQuoteQuery.data;
     const solActionBusy = ["approving", "signing", "pending"].includes(solanaAction);
     const validSolSlippage = Number.isFinite(Number(slippage)) && Number(slippage) >= 0 && Number(slippage) <= 20;
     const solSwapReady = !!activeWallet && !!solAddress && !!solInputState.raw && !solInputState.error
-      && !!raydiumQuote && !solQuoteQuery.isFetching && validSolSlippage && !solActionBusy;
+      && !!raydiumQuote && (solanaQuoteOverride !== null || !solQuoteQuery.isFetching)
+      && validSolSlippage && !solActionBusy && !solanaRecoveryLoading && !solanaRecovery;
     const rate = raydiumQuote && raydiumQuote.inputAmount > 0n
       ? (Number(raydiumQuote.outputAmount) / (10 ** outputDecimals)) / (Number(raydiumQuote.inputAmount) / (10 ** solanaInputDecimals))
       : 0;
@@ -767,6 +908,36 @@ export default function SwapScreen() {
 
     return (
       <View style={s.formCard}>
+        {solanaRecoveryLoading ? (
+          <Notice icon="sync-outline" tone="muted" colors={colors}>Checking this wallet for an interrupted Raydium swap…</Notice>
+        ) : solanaRecovery ? (
+          <View style={s.recoveryCard}>
+            <Text style={s.recoveryTitle}>Interrupted Raydium swap found</Text>
+            <Text style={s.recoveryText}>
+              {solanaRecovery.progress.transactions.filter((transaction) => transaction.status === "confirmed").length} of {solanaRecovery.progress.transactions.length} transactions are confirmed for the {solanaRecovery.direction === "sol-to-gmi" ? "SOL → GMI" : "GMI → SOL"} swap. Resume the saved batch or dismiss it before starting a new swap.
+            </Text>
+            <View style={s.recoveryActions}>
+              <TouchableOpacity
+                style={[s.recoveryButton, s.recoveryButtonPrimary]}
+                onPress={() => void resumeStoredSolanaSwap()}
+                activeOpacity={0.82}
+                accessibilityRole="button"
+                accessibilityLabel="Resume interrupted Raydium swap"
+              >
+                <Text style={[s.recoveryButtonText, s.recoveryButtonTextPrimary]}>Resume swap</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={s.recoveryButton}
+                onPress={() => void dismissStoredSolanaSwap()}
+                activeOpacity={0.82}
+                accessibilityRole="button"
+                accessibilityLabel="Dismiss interrupted Raydium swap"
+              >
+                <Text style={s.recoveryButtonText}>Dismiss</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        ) : null}
         <View style={s.intro}>
           <View style={s.introIcon}><Icon name="flash-outline" size={19} color={colors.primary} /></View>
           <View style={s.introCopy}>
@@ -788,8 +959,9 @@ export default function SwapScreen() {
           amount={solAmount}
           placeholder="0.00"
           available={solanaInputBalanceQuery.isLoading ? "Loading…" : inputBalance}
-          onChange={(value) => { setSolAmount(value); setSolanaAction("idle"); setSolanaError(null); }}
+          onChange={(value) => { setSolAmount(value); setSolanaAction("idle"); setSolanaError(null); setSolanaProgress(null); setSolanaQuoteOverride(null); setSolanaTxHash(null); }}
           onMax={() => setSolAmount(inputBalance)}
+          disabled={!!solanaProgress}
           colors={colors}
         />
         <View style={s.switchRow}>
@@ -802,7 +974,10 @@ export default function SwapScreen() {
               setSolanaAction("idle");
               setSolanaError(null);
               setSolanaTxHash(null);
+              setSolanaProgress(null);
+              setSolanaQuoteOverride(null);
             }}
+            disabled={!!solanaProgress}
             activeOpacity={0.75}
             accessibilityRole="button"
             accessibilityLabel="Switch Solana swap direction"
@@ -822,20 +997,21 @@ export default function SwapScreen() {
         />
         {solInputState.error && solAmount.length > 0 ? <Notice icon="alert-triangle" tone="warning" colors={colors}>{solInputState.error}</Notice> : null}
         {solanaInputBalanceQuery.isError ? <Notice icon="wifi-outline" tone="error" colors={colors}>Could not read your {solanaInputSymbol} balance. Refresh and try again.</Notice> : null}
-        {solAmount.trim().length > 0 && solQuoteQuery.isError ? <Notice icon="wifi-outline" tone="error" colors={colors}>{solQuoteQuery.error instanceof Error ? solQuoteQuery.error.message : "Raydium quote unavailable"}</Notice> : null}
+        {solAmount.trim().length > 0 && !solanaQuoteOverride && solQuoteQuery.isError ? <Notice icon="wifi-outline" tone="error" colors={colors}>{solQuoteQuery.error instanceof Error ? solQuoteQuery.error.message : "Raydium quote unavailable"}</Notice> : null}
         <View style={s.detailCard}>
           <View style={s.detailRow}><Text style={s.detailLabel}>Rate</Text><Text style={s.detailValue}>{rate > 0 ? `1 ${solanaInputSymbol} ≈ ${rate.toLocaleString("en-US", { maximumFractionDigits: 6 })} ${solanaOutputSymbol}` : "—"}</Text></View>
           <View style={s.detailRow}><Text style={s.detailLabel}>Minimum received</Text><Text style={s.detailValue}>{raydiumQuote ? `${formatSolanaAmount(raydiumQuote.minimumOutputAmount, outputDecimals)} ${solanaOutputSymbol}` : "—"}</Text></View>
           <View style={s.detailRow}><Text style={s.detailLabel}>Price impact</Text><Text style={s.detailValue}>{raydiumQuote ? `${raydiumQuote.priceImpactPct.toFixed(2)}%` : "—"}</Text></View>
           <View style={s.detailRow}><Text style={s.detailLabel}>Route</Text><Text style={s.detailValue}>Raydium CPMM</Text></View>
-          <View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
+          <View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} editable={!solanaProgress} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
         </View>
-        {solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
+        {!solanaQuoteOverride && solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
+        {solanaProgress ? <Notice icon="sync-outline" tone="warning" colors={colors}>Partial progress saved: {solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length} of {solanaProgress.transactions.length} Raydium transactions confirmed. Resume is safe and will skip completed transactions.</Notice> : null}
         {solanaError ? <Notice icon="alert-circle" tone="error" colors={colors}>{solanaError}</Notice> : null}
         {solanaAction === "success" ? <Notice icon="checkmark-circle" tone="success" colors={colors}>Swap confirmed{solanaTxHash ? ` · ${shortenHash(solanaTxHash)}` : ""}.</Notice> : null}
         <TouchableOpacity style={[s.primaryButton, solSwapReady && s.primaryButtonReady]} disabled={!solSwapReady} onPress={() => void submitSolanaSwap()} activeOpacity={0.82}>
           <Text style={[s.primaryButtonText, solSwapReady && s.primaryButtonTextReady]}>
-            {!solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Confirming on Solana…" : "Review & swap"}
+            {solanaRecoveryLoading ? "Checking interrupted swaps…" : solanaRecovery ? "Resume or dismiss the saved swap" : !solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : !solanaQuoteOverride && solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Confirming on Solana…" : solanaProgress ? "Resume swap" : "Review & swap"}
           </Text>
         </TouchableOpacity>
         <Text style={s.helperText}>Your wallet signs locally. Review the Raydium route and minimum received amount before signing.</Text>

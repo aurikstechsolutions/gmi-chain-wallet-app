@@ -8,3 +8,5 @@
 - [GitHub publish pack repair](github-publish-pack-repair.md) — A fresh no-delta snapshot can recover GitHub pushes rejected for a missing expected object despite clean local fsck.
 - [Solana wallet derivation](solana-wallet-derivation.md) — Derive each Solana Ed25519 account from the wallet’s existing 32-byte secret; NFC entries persist only the public address.
 - [BSC transfer quotes](bsc-transfer-quotes.md) — Quote chain-56 nonce, gas price, and exact gas before confirmation; sign only the reviewed, still-current parameters.
+- [Raydium Trade API payloads](raydium-trade-api.md) — Preserve the full compute quote envelope; transaction responses contain `{ transaction: base64 }` objects.
+- [Raydium recovery storage](raydium-recovery-storage.md) — Persist resumable transaction batches in durable general storage; platform key stores may reject larger serialized batches.

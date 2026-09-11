@@ -2,7 +2,14 @@ require("./register-typescript.cjs");
 
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { Keypair, PublicKey, SystemInstruction } = require("@solana/web3.js");
+const {
+  Connection,
+  Keypair,
+  PublicKey,
+  SystemInstruction,
+  Transaction,
+  SystemProgram,
+} = require("@solana/web3.js");
 const {
   getAssociatedTokenAddress,
   TOKEN_PROGRAM_ID,
@@ -19,11 +26,24 @@ const {
   SOLANA_GMI_CONTRACT_ADDRESS,
   SOLANA_USDT_CONTRACT_ADDRESS,
 } = require("../services/solanaAssets.ts");
+const {
+  executeRaydiumSwap,
+  parseRaydiumSwapRecovery,
+  RaydiumSwapError,
+  restoreRaydiumQuote,
+  snapshotRaydiumQuote,
+  SOLANA_WRAPPED_SOL_MINT,
+} = require("../services/raydium.ts");
+const {
+  createRaydiumSwapRecoveryStore,
+  raydiumSwapRecoveryKey,
+} = require("../services/raydiumRecovery.ts");
 
 const PRIVATE_KEY_HEX = "01".repeat(32);
 const RECIPIENT = Keypair.fromSeed(new Uint8Array(32).fill(2)).publicKey;
 const MINT = new PublicKey(SOLANA_GMI_CONTRACT_ADDRESS);
 const BLOCKHASH = Keypair.fromSeed(new Uint8Array(32).fill(3)).publicKey.toBase58();
+const SOLANA_WALLET_ADDRESS = Keypair.fromSeed(new Uint8Array(32).fill(1)).publicKey.toBase58();
 
 function accountInfo() {
   return {
@@ -62,6 +82,108 @@ function rpc(overrides = {}) {
     ...overrides,
   };
   return value;
+}
+
+function raydiumQuote() {
+  return {
+    inputMint: SOLANA_WRAPPED_SOL_MINT,
+    outputMint: SOLANA_GMI_CONTRACT_ADDRESS,
+    inputAmount: 1n,
+    outputAmount: 1n,
+    minimumOutputAmount: 1n,
+    priceImpactPct: 0,
+    routePlan: [{
+      poolId: "test-pool",
+      inputMint: SOLANA_WRAPPED_SOL_MINT,
+      outputMint: SOLANA_GMI_CONTRACT_ADDRESS,
+      feeAmount: "0",
+      feeRate: 0,
+    }],
+    raw: {
+      success: true,
+      version: "V1",
+      data: { inputMint: SOLANA_WRAPPED_SOL_MINT },
+    },
+  };
+}
+
+function raydiumTransaction() {
+  const owner = Keypair.fromSeed(new Uint8Array(32).fill(1)).publicKey;
+  const transaction = new Transaction({
+    feePayer: owner,
+    recentBlockhash: BLOCKHASH,
+  }).add(SystemProgram.transfer({
+    fromPubkey: owner,
+    toPubkey: owner,
+    lamports: 1,
+  }));
+  return {
+    transaction: Buffer.from(
+      transaction.serialize({ requireAllSignatures: false, verifySignatures: false }),
+    ).toString("base64"),
+  };
+}
+
+async function executeMockedRaydiumSwap(data) {
+  const originalFetch = global.fetch;
+  const originalSendRawTransaction = Connection.prototype.sendRawTransaction;
+  const originalConfirmTransaction = Connection.prototype.confirmTransaction;
+  const sent = [];
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ success: true, data }),
+  });
+  Connection.prototype.sendRawTransaction = async (_raw) => {
+    sent.push(_raw);
+    return "test-signature";
+  };
+  Connection.prototype.confirmTransaction = async () => ({
+    context: { slot: 1 },
+    value: { err: null },
+  });
+
+  try {
+    const result = await executeRaydiumSwap(
+      PRIVATE_KEY_HEX,
+      SOLANA_WALLET_ADDRESS,
+      raydiumQuote(),
+    );
+    return { result, sent };
+  } finally {
+    global.fetch = originalFetch;
+    Connection.prototype.sendRawTransaction = originalSendRawTransaction;
+    Connection.prototype.confirmTransaction = originalConfirmTransaction;
+  }
+}
+
+async function withMockedRaydiumSwap(data, callback) {
+  const originalFetch = global.fetch;
+  const originalSendRawTransaction = Connection.prototype.sendRawTransaction;
+  const originalConfirmTransaction = Connection.prototype.confirmTransaction;
+  const sent = [];
+  let sendCount = 0;
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ success: true, data }),
+  });
+  Connection.prototype.sendRawTransaction = async (raw) => {
+    sent.push(raw);
+    sendCount += 1;
+    if (sendCount === 2) throw new Error("RPC disconnected after the first broadcast");
+    return `test-signature-${sendCount}`;
+  };
+  Connection.prototype.confirmTransaction = async () => ({
+    context: { slot: 1 },
+    value: { err: null },
+  });
+
+  try {
+    return await callback({ sent, get sendCount() { return sendCount; } });
+  } finally {
+    global.fetch = originalFetch;
+    Connection.prototype.sendRawTransaction = originalSendRawTransaction;
+    Connection.prototype.confirmTransaction = originalConfirmTransaction;
+  }
 }
 
 test("derives a stable public Solana address from a fixed seed", () => {
@@ -188,4 +310,178 @@ test("bundled mint addresses and decimals match canonical on-chain metadata", as
   for (const asset of BUNDLED_SOLANA_ASSETS) {
     assert.equal(await fetchSolanaMintDecimals(asset.mintAddress, mintRpc), asset.decimals);
   }
+});
+
+test("accepts Raydium transactions returned directly in the data array", async () => {
+  const { result, sent } = await executeMockedRaydiumSwap([raydiumTransaction()]);
+
+  assert.deepEqual(result, {
+    signatures: ["test-signature"],
+    poolId: "test-pool",
+  });
+  assert.equal(sent.length, 1);
+});
+
+test("keeps accepting the legacy nested Raydium transaction response", async () => {
+  const { result, sent } = await executeMockedRaydiumSwap({
+    data: [raydiumTransaction()],
+  });
+
+  assert.deepEqual(result, {
+    signatures: ["test-signature"],
+    poolId: "test-pool",
+  });
+  assert.equal(sent.length, 1);
+});
+
+test("executes every transaction in a multi-transaction Raydium swap", async () => {
+  const { result, sent } = await executeMockedRaydiumSwap([
+    raydiumTransaction(),
+    raydiumTransaction(),
+  ]);
+
+  assert.deepEqual(result, {
+    signatures: ["test-signature", "test-signature"],
+    poolId: "test-pool",
+  });
+  assert.equal(sent.length, 2);
+});
+
+test("resumes a partially broadcast swap without resending confirmed transactions", async () => {
+  await withMockedRaydiumSwap(
+    [raydiumTransaction(), raydiumTransaction()],
+    async ({ sent }) => {
+      let progress;
+      await assert.rejects(
+        executeRaydiumSwap(
+          PRIVATE_KEY_HEX,
+          SOLANA_WALLET_ADDRESS,
+          raydiumQuote(),
+          { onProgress: (nextProgress) => { progress = nextProgress; } },
+        ),
+        (error) => {
+          assert.ok(error instanceof RaydiumSwapError);
+          assert.equal(error.progress.transactions[0].status, "confirmed");
+          assert.equal(error.progress.transactions[0].signature, "test-signature-1");
+          assert.equal(error.progress.transactions[1].status, "pending");
+          assert.equal(error.progress.transactions[1].signature, undefined);
+          progress = error.progress;
+          return true;
+        },
+      );
+      assert.equal(sent.length, 2);
+
+      const result = await executeRaydiumSwap(
+        PRIVATE_KEY_HEX,
+        SOLANA_WALLET_ADDRESS,
+        raydiumQuote(),
+        { resume: progress },
+      );
+      assert.deepEqual(result, {
+        signatures: ["test-signature-1", "test-signature-3"],
+        poolId: "test-pool",
+      });
+      assert.equal(sent.length, 3);
+    },
+  );
+});
+
+test("round-trips a wallet-scoped Raydium recovery record without serializing bigint values", () => {
+  const quote = raydiumQuote();
+  const recovery = {
+    walletAddress: SOLANA_WALLET_ADDRESS,
+    direction: "sol-to-gmi",
+    amount: "0.25",
+    quote: snapshotRaydiumQuote(quote),
+    progress: {
+      poolId: "test-pool",
+      transactions: [{
+        transaction: "unsigned-transaction",
+        signature: "confirmed-signature",
+        status: "confirmed",
+      }, {
+        transaction: "next-transaction",
+        status: "pending",
+      }],
+    },
+    savedAt: "2026-09-11T00:00:00.000Z",
+  };
+
+  const parsed = parseRaydiumSwapRecovery(JSON.stringify(recovery));
+  assert.deepEqual(parsed, recovery);
+  assert.deepEqual(restoreRaydiumQuote(parsed.quote), {
+    ...quote,
+    raw: null,
+  });
+  assert.equal(parseRaydiumSwapRecovery("{not-json"), null);
+});
+
+test("restores recovery across remounts and isolates it when switching wallets", async () => {
+  const values = new Map();
+  const storage = {
+    get: async (key) => values.get(key) ?? null,
+    set: async (key, value) => { values.set(key, value); },
+    delete: async (key) => { values.delete(key); },
+  };
+  const walletA = {
+    id: "wallet-a",
+    address: SOLANA_WALLET_ADDRESS,
+    recovery: {
+      walletAddress: SOLANA_WALLET_ADDRESS,
+      direction: "sol-to-gmi",
+      amount: "0.25",
+      quote: snapshotRaydiumQuote(raydiumQuote()),
+      progress: {
+        poolId: "test-pool",
+        transactions: [{ transaction: "wallet-a-transaction", status: "pending" }],
+      },
+      savedAt: "2026-09-11T00:00:00.000Z",
+    },
+  };
+  const walletB = {
+    id: "wallet-b",
+    address: Keypair.fromSeed(new Uint8Array(32).fill(4)).publicKey.toBase58(),
+    recovery: {
+      ...walletA.recovery,
+      walletAddress: Keypair.fromSeed(new Uint8Array(32).fill(4)).publicKey.toBase58(),
+      amount: "0.5",
+      progress: {
+        ...walletA.recovery.progress,
+        transactions: [{ transaction: "wallet-b-transaction", status: "confirmed" }],
+      },
+    },
+  };
+
+  const firstScreen = createRaydiumSwapRecoveryStore(storage);
+  await firstScreen.save(walletA.id, walletA.recovery);
+  await firstScreen.save(walletB.id, walletB.recovery);
+
+  // A new store instance represents the swap screen after a remount or reload.
+  const remountedScreen = createRaydiumSwapRecoveryStore(storage);
+  assert.deepEqual(
+    await remountedScreen.load(walletA.id, walletA.address),
+    walletA.recovery,
+  );
+
+  // The active wallet only reads its own key; switching to B does not expose A.
+  assert.equal(await remountedScreen.load(walletB.id, walletA.address), null);
+  assert.deepEqual(
+    await remountedScreen.load(walletB.id, walletB.address),
+    walletB.recovery,
+  );
+  assert.equal(await storage.get(raydiumSwapRecoveryKey(walletA.id)) !== null, true);
+
+  // Successful completion clears only the active wallet's saved batch.
+  await remountedScreen.clear(walletB.id);
+  assert.equal(await storage.get(raydiumSwapRecoveryKey(walletB.id)), null);
+  // Explicit dismissal clears the other wallet's saved batch as well.
+  await remountedScreen.clear(walletA.id);
+  assert.equal(await storage.get(raydiumSwapRecoveryKey(walletA.id)), null);
+});
+
+test("reports a clear error when Raydium returns no transactions", async () => {
+  await assert.rejects(
+    executeMockedRaydiumSwap([]),
+    /Raydium did not return a swap transaction/,
+  );
 });
