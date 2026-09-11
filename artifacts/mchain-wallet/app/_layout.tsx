@@ -18,7 +18,6 @@ import { SafeAreaProvider } from "react-native-safe-area-context";
 import { ErrorBoundary } from "@/components/ErrorBoundary";
 import { NfcSigningModal } from "@/components/NfcSigningModal";
 import { PinModal } from "@/components/PinModal";
-import { ScreenProtection } from "@/components/ScreenProtection";
 import { SplashLoader } from "@/components/SplashLoader";
 import { PinProvider, usePinContext } from "@/context/PinContext";
 import { WalletProvider, useWallet } from "@/context/WalletContext";
@@ -138,8 +137,6 @@ export default function RootLayout() {
           persistOptions={{ persister: asyncStoragePersister, maxAge: 24 * 60 * 60_000 }}
         >
           <GestureHandlerRootView style={{ flex: 1, backgroundColor: colors.light.background }}>
-            <ScreenProtection>
-
             <WalletProvider>
               <PinProvider>
                 {/* Children render when ready — they paint behind the loader */}
@@ -164,7 +161,6 @@ export default function RootLayout() {
              */}
             <SplashLoader ready={appReady} onDone={() => {}} />
 
-            </ScreenProtection>
           </GestureHandlerRootView>
         </PersistQueryClientProvider>
       </ErrorBoundary>
