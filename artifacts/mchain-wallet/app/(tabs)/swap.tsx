@@ -647,6 +647,25 @@ export default function SwapScreen() {
   async function resumeStoredSolanaSwap() {
     if (!solanaRecovery || !activeWallet || solanaRecovery.walletAddress !== solAddress) return;
     try {
+      const confirmedCount = solanaRecovery.progress.transactions.filter(
+        (transaction) => transaction.status === "confirmed",
+      ).length;
+      if (confirmedCount === 0) {
+        // A failed preflight leaves the original serialized transaction in
+        // recovery storage. Its blockhash and simulation context can become
+        // stale, so resending it creates an endless failure loop. Keep the
+        // amount/direction, discard only the stale transaction batch, and let
+        // the live quote query build a fresh Raydium transaction.
+        await clearSolanaRecovery(activeWallet.id);
+        setSolanaSwapDirection(solanaRecovery.direction);
+        setSolAmount(solanaRecovery.amount);
+        setSolanaRecovery(null);
+        setSolanaProgress(null);
+        setSolanaQuoteOverride(null);
+        setSolanaAction("idle");
+        setSolanaError("The saved Raydium transaction was not confirmed. The stale transaction was discarded; review a fresh quote and retry.");
+        return;
+      }
       const quote = restoreRaydiumQuote(solanaRecovery.quote);
       setSolanaSwapDirection(solanaRecovery.direction);
       setSolAmount(solanaRecovery.amount);
@@ -924,7 +943,11 @@ export default function SwapScreen() {
                 accessibilityRole="button"
                 accessibilityLabel="Resume interrupted Raydium swap"
               >
-                <Text style={[s.recoveryButtonText, s.recoveryButtonTextPrimary]}>Resume swap</Text>
+                <Text style={[s.recoveryButtonText, s.recoveryButtonTextPrimary]}>
+                  {solanaRecovery.progress.transactions.some((transaction) => transaction.status === "confirmed")
+                    ? "Resume swap"
+                    : "Refresh quote & retry"}
+                </Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={s.recoveryButton}
@@ -1006,7 +1029,11 @@ export default function SwapScreen() {
           <View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} editable={!solanaProgress} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
         </View>
         {!solanaQuoteOverride && solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
-        {solanaProgress ? <Notice icon="sync-outline" tone="warning" colors={colors}>Partial progress saved: {solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length} of {solanaProgress.transactions.length} Raydium transactions confirmed. Resume is safe and will skip completed transactions.</Notice> : null}
+        {solanaProgress ? <Notice icon="sync-outline" tone="warning" colors={colors}>
+          {solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length === 0
+            ? "The previous Raydium transaction was not confirmed. Resume will discard the stale transaction and request a fresh quote."
+            : `Partial progress saved: ${solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length} of ${solanaProgress.transactions.length} Raydium transactions confirmed. Resume is safe and will skip completed transactions.`}
+        </Notice> : null}
         {solanaError ? <Notice icon="alert-circle" tone="error" colors={colors}>{solanaError}</Notice> : null}
         {solanaAction === "success" ? <Notice icon="checkmark-circle" tone="success" colors={colors}>Swap confirmed{solanaTxHash ? ` · ${shortenHash(solanaTxHash)}` : ""}.</Notice> : null}
         <TouchableOpacity style={[s.primaryButton, solSwapReady && s.primaryButtonReady]} disabled={!solSwapReady} onPress={() => void submitSolanaSwap()} activeOpacity={0.82}>

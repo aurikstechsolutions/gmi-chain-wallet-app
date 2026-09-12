@@ -201,6 +201,29 @@ function copyRaydiumSwapProgress(progress: RaydiumSwapProgress): RaydiumSwapProg
   };
 }
 
+async function describeRaydiumError(error: unknown, connection: Connection): Promise<string> {
+  const candidate = error as {
+    message?: string;
+    getLogs?: (connection: Connection) => Promise<string[] | null>;
+  };
+  const baseMessage = candidate?.message || "Raydium swap transaction failed";
+  let logs: string[] | null = null;
+  if (typeof candidate?.getLogs === "function") {
+    try {
+      logs = await candidate.getLogs(connection);
+    } catch {
+      logs = null;
+    }
+  }
+  if (logs && logs.length > 0) {
+    return `${baseMessage.replace(/\s*Logs:\s*\[\]\s*$/, "")} Logs:\n${logs.join("\n")}`;
+  }
+  if (/blockhash|expired|simulation/i.test(baseMessage)) {
+    return `${baseMessage.replace(/\s*Logs:\s*\[\]\s*$/, "")} The Raydium transaction may have expired or become stale; request a fresh quote before retrying.`;
+  }
+  return baseMessage;
+}
+
 export function snapshotRaydiumQuote(quote: RaydiumSwapQuote): RaydiumSwapQuoteSnapshot {
   return {
     inputMint: quote.inputMint,
@@ -366,7 +389,7 @@ export async function executeRaydiumSwap(
       options.onProgress?.(copyRaydiumSwapProgress(progress));
       signatures.push(signature);
     } catch (error) {
-      const message = error instanceof Error ? error.message : "Raydium swap transaction failed";
+      const message = await describeRaydiumError(error, connection);
       throw new RaydiumSwapError(message, copyRaydiumSwapProgress(progress));
     }
   }

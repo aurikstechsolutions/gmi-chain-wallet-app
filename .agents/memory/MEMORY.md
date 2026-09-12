@@ -11,3 +11,4 @@
 - [Raydium Trade API payloads](raydium-trade-api.md) — Preserve the full compute quote envelope; transaction responses contain `{ transaction: base64 }` objects.
 - [Raydium recovery storage](raydium-recovery-storage.md) — Persist resumable transaction batches in durable general storage; platform key stores may reject larger serialized batches.
 - [Solana history RPC](solana-history-rpc.md) — The configured public Solana endpoint supports parsed data through getTransaction(jsonParsed), not parsed-specific or batch transaction methods.
+- [Raydium stale retries](raydium-stale-retries.md) — A zero-confirmation Raydium failure must discard the serialized batch and obtain a fresh quote before retrying.
