@@ -279,6 +279,9 @@ function stylesFor(colors: ReturnType<typeof useColors>) {
     detailRowLast: { borderBottomWidth: 0 },
     detailLabel: { fontSize: 12, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
     detailValue: { flexShrink: 1, fontSize: 12, fontFamily: "Inter_600SemiBold", color: colors.foreground, textAlign: "right" },
+    slippageLabel: { flex: 1, minWidth: 0 },
+    slippageControl: { flexDirection: "row", alignItems: "center", justifyContent: "flex-end", flexShrink: 0, gap: 6 },
+    slippageUnit: { minWidth: 12, fontSize: 14, lineHeight: 20 },
     primaryButton: { alignItems: "center", justifyContent: "center", minHeight: 49, marginTop: 16, borderRadius: 13, backgroundColor: colors.muted },
     primaryButtonReady: { backgroundColor: colors.primary },
     primaryButtonText: { fontSize: 14, fontFamily: "Inter_700Bold", color: colors.mutedForeground },
@@ -1201,7 +1204,13 @@ export default function SwapScreen() {
           <View style={s.detailRow}><Text style={s.detailLabel}>Minimum received</Text><Text style={s.detailValue}>{raydiumQuote ? `${formatSolanaAmount(raydiumQuote.minimumOutputAmount, outputDecimals)} ${solanaOutputSymbol}` : "—"}</Text></View>
           <View style={s.detailRow}><Text style={s.detailLabel}>Price impact</Text><Text style={s.detailValue}>{raydiumQuote ? `${raydiumQuote.priceImpactPct.toFixed(2)}%` : "—"}</Text></View>
           <View style={s.detailRow}><Text style={s.detailLabel}>Route</Text><Text style={s.detailValue}>Raydium CPMM</Text></View>
-          <View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} editable={!solanaProgress} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
+          <View style={[s.detailRow, s.detailRowLast]}>
+            <Text style={[s.detailLabel, s.slippageLabel]}>Slippage tolerance</Text>
+            <View style={s.slippageControl}>
+              <TextInput value={slippage} editable={!solanaProgress} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} />
+              <Text style={[s.detailValue, s.slippageUnit]}>%</Text>
+            </View>
+          </View>
         </View>
         {!solanaQuoteOverride && solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
         {solActionBusy ? <Notice icon="sync-outline" tone="muted" colors={colors}>Processing</Notice> : null}
@@ -1366,7 +1375,13 @@ export default function SwapScreen() {
                       <View style={s.detailRow}><Text style={s.detailLabel}>Minimum received</Text><Text style={s.detailValue}>{quote && toAsset ? `${formatAmmUnits(quote.minimumOut, toToken?.decimals ?? 18)} ${toAsset.symbol}` : "—"}</Text></View>
                       <View style={s.detailRow}><Text style={s.detailLabel}>Price impact</Text><Text style={s.detailValue}>{quote ? formatBps(quote.priceImpactBps) : "—"}</Text></View>
                       <View style={s.detailRow}><Text style={s.detailLabel}>Pool fee</Text><Text style={s.detailValue}>{ammConfig ? formatBps(ammConfig.feeBps) : "—"}</Text></View>
-                      <View style={s.detailRow}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} onChangeText={setSlippage} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
+                      <View style={[s.detailRow, s.detailRowLast]}>
+                        <Text style={[s.detailLabel, s.slippageLabel]}>Slippage tolerance</Text>
+                        <View style={s.slippageControl}>
+                          <TextInput value={slippage} onChangeText={setSlippage} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} />
+                          <Text style={[s.detailValue, s.slippageUnit]}>%</Text>
+                        </View>
+                      </View>
                     </View>
                     {quoteStale ? <Notice icon="clock" tone="warning" colors={colors}>Quote expired after one minute. Refresh the pool before signing.</Notice> : null}
                     {ammError ? <Notice icon="alert-circle" tone="error" colors={colors}>{ammError}</Notice> : null}
@@ -1381,7 +1396,16 @@ export default function SwapScreen() {
                     <AmountField label="GMI deposit" asset={{ id: "gmi", symbol: "GMI", name: "GMI", networkLabel: "GMI Chain" }} amount={lpGmiAmount} placeholder="0.00" available={formatAmmUnits(snapshot!.nativeBalance, nativeDecimals)} onChange={(value) => updateLiquidityAmount("gmi", value)} onMax={() => updateLiquidityAmount("gmi", formatAmmUnits(snapshot!.nativeBalance, nativeDecimals))} colors={colors} />
                     <View style={{ height: 8 }} />
                     <AmountField label="wUSDT deposit" asset={{ id: "wusdt", symbol: "wUSDT", name: "Wrapped USDT", networkLabel: "GMI Chain" }} amount={lpTokenAmount} placeholder="0.00" available={formatAmmUnits(snapshot!.tokenBalance, tokenDecimals)} onChange={(value) => updateLiquidityAmount("wusdt", value)} onMax={() => updateLiquidityAmount("wusdt", formatAmmUnits(snapshot!.tokenBalance, tokenDecimals))} colors={colors} />
-                    <View style={s.detailCard}><View style={s.detailRow}><Text style={s.detailLabel}>Current pool</Text><Text style={s.detailValue}>{currentPair}</Text></View><View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} onChangeText={setSlippage} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View></View>
+                    <View style={s.detailCard}>
+                      <View style={s.detailRow}><Text style={s.detailLabel}>Current pool</Text><Text style={s.detailValue}>{currentPair}</Text></View>
+                      <View style={[s.detailRow, s.detailRowLast]}>
+                        <Text style={[s.detailLabel, s.slippageLabel]}>Slippage tolerance</Text>
+                        <View style={s.slippageControl}>
+                          <TextInput value={slippage} onChangeText={setSlippage} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} />
+                          <Text style={[s.detailValue, s.slippageUnit]}>%</Text>
+                        </View>
+                      </View>
+                    </View>
                     <Text style={[s.sectionTitle, { marginTop: 18, marginBottom: 9 }]}>Remove liquidity</Text>
                     <AmountField label="LP amount" asset={{ id: "lp", symbol: "LP", name: "GMI / wUSDT", networkLabel: "GMI Chain" }} amount={removeAmount} placeholder="0.00" available={lpBalance} onChange={setRemoveAmount} onMax={() => setRemoveAmount(lpBalance)} colors={colors} />
                     {snapshot!.totalSupply === 0n ? <Notice icon="information-circle-outline" tone="warning" colors={colors}>There are no LP tokens in this pool yet. Add the first liquidity position to open the market.</Notice> : null}
@@ -1456,6 +1480,6 @@ const styles = StyleSheet.create({
   loadingBlock: { padding: 16, borderRadius: 12, gap: 10 },
   loadingLine: { height: 18, borderRadius: 9, opacity: 0.65 },
   loadingLineShort: { width: "62%" },
-  slippageInput: { width: 54, height: 30, marginRight: 4, paddingHorizontal: 7, borderWidth: 1, borderRadius: 7, textAlign: "right", fontSize: 12, fontFamily: "Inter_600SemiBold" },
+  slippageInput: { width: 72, height: 38, paddingHorizontal: 10, paddingVertical: 0, borderWidth: 1, borderRadius: 9, textAlign: "right", textAlignVertical: "center", includeFontPadding: false, fontSize: 14, fontFamily: "Inter_600SemiBold" },
   fieldLabel: { fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 0.8, textTransform: "uppercase", marginBottom: 7 },
 });
