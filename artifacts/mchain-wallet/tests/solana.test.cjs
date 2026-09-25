@@ -17,6 +17,7 @@ const {
 const {
   deriveSolanaAddress,
   fetchSolanaMintDecimals,
+  fetchSolanaTokenBalance,
   parseSolanaAmount,
   sendSolWithConnection,
   sendSolanaTokenWithConnection,
@@ -204,6 +205,49 @@ test("rejects zero, sub-base-unit, and excess-precision amounts", () => {
   assert.throws(() => parseSolanaAmount("0.0000001", 6), /6 decimal places/);
   assert.equal(parseSolanaAmount("0.000000001", 9), 1n);
   assert.equal(parseSolanaAmount("0.000001", 6), 1n);
+});
+
+test("fetches and formats all owner's Solana mint accounts with RPC fallback", async () => {
+  const originalFetch = global.fetch;
+  const requests = [];
+  global.fetch = async (url, options) => {
+    requests.push({ url, body: JSON.parse(options.body) });
+    if (url.includes("api.mainnet-beta.solana.com")) {
+      throw new Error("primary Solana RPC unavailable");
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        result: {
+          value: [
+            { account: { data: { parsed: { info: { tokenAmount: { amount: "45000000" } } } } } },
+            { account: { data: { parsed: { info: { tokenAmount: { amount: "170853" } } } } } },
+          ],
+        },
+      }),
+    };
+  };
+
+  try {
+    assert.equal(
+      await fetchSolanaTokenBalance(
+        SOLANA_GMI_CONTRACT_ADDRESS,
+        SOLANA_WALLET_ADDRESS,
+        6,
+      ),
+      "45.170853",
+    );
+    assert.equal(requests.length, 2);
+    assert.equal(requests[0].body.method, "getTokenAccountsByOwner");
+    assert.deepEqual(requests[0].body.params, [
+      SOLANA_WALLET_ADDRESS,
+      { mint: SOLANA_GMI_CONTRACT_ADDRESS },
+      { encoding: "jsonParsed", commitment: "confirmed" },
+    ]);
+    assert.match(requests[1].url, /solana-rpc\.publicnode\.com/);
+  } finally {
+    global.fetch = originalFetch;
+  }
 });
 
 test("requires native SOL amount plus the estimated network fee", async () => {

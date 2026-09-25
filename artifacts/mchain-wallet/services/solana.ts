@@ -152,14 +152,12 @@ export async function fetchSolanaTokenBalanceRaw(
 export async function fetchSolanaTokenBalance(
   mintAddress: string,
   ownerAddress: string,
+  decimals: number,
 ): Promise<string> {
-  const owner = new PublicKey(ownerAddress);
-  const mint = new PublicKey(mintAddress);
-  const tokenAccount = await getAssociatedTokenAddress(mint, owner);
-  const accountInfo = await connection.getAccountInfo(tokenAccount, "confirmed");
-  if (!accountInfo) return "0";
-  const balance = await connection.getTokenAccountBalance(tokenAccount, "confirmed");
-  return balance.value.uiAmountString ?? "0";
+  return formatSolanaAmount(
+    await fetchSolanaTokenBalanceRaw(mintAddress, ownerAddress),
+    decimals,
+  );
 }
 
 export interface SolanaHistoryEntry {

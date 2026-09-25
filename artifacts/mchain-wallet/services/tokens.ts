@@ -362,7 +362,7 @@ export async function fetchDefaultAssetBalance(
 ): Promise<string> {
   if (asset.chain === "solana") {
     return asset.contractAddress
-      ? fetchSolanaTokenBalance(asset.contractAddress, walletAddress)
+      ? fetchSolanaTokenBalance(asset.contractAddress, walletAddress, asset.decimals)
       : fetchSolanaBalance(walletAddress);
   }
   if (asset.chain === "bsc") {
