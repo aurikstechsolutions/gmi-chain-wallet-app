@@ -14,6 +14,7 @@ import * as Haptics from "expo-haptics";
 import { router, useFocusEffect } from "expo-router";
 import React, { useCallback, useEffect, useRef } from "react";
 import {
+  Alert,
   ActivityIndicator,
   Animated,
   Image,
@@ -216,8 +217,10 @@ function DefaultAssetRow({
     },
   });
 
-  const { data: balance, isLoading } = useQuery({
-    queryKey: ["defaultAssetBalance", asset.id, walletAddress],
+  const { data: balance, isLoading, isError, error, refetch } = useQuery({
+    queryKey: asset.chain === "solana"
+      ? ["defaultAssetBalance", asset.id, walletAddress, "solana-balance-v2"]
+      : ["defaultAssetBalance", asset.id, walletAddress],
     queryFn: () =>
       walletAddress
         ? fetchDefaultAssetBalance(asset, walletAddress)
@@ -225,6 +228,7 @@ function DefaultAssetRow({
     enabled: !!walletAddress,
     refetchInterval: 30_000,
     staleTime: 15_000,
+    refetchOnMount: "always",
   });
 
   const prevBalRef = React.useRef<string | undefined>(undefined);
@@ -238,7 +242,24 @@ function DefaultAssetRow({
   const usdValue = price && balance ? parseFloat(balance.replace(/,/g, "")) * price : 0;
 
   return (
-    <TouchableOpacity style={s.row} onPress={() => onPress(balance ?? "—")} activeOpacity={0.8}>
+    <TouchableOpacity
+      style={s.row}
+      onPress={() => {
+        if (isError) {
+          Alert.alert(
+            "Balance unavailable",
+            error instanceof Error ? error.message : "The token balance could not be loaded.",
+            [
+              { text: "Close", style: "cancel" },
+              { text: "Retry", onPress: () => { void refetch(); } },
+            ],
+          );
+          return;
+        }
+        onPress(balance ?? "—");
+      }}
+      activeOpacity={0.8}
+    >
       {asset.symbol.toUpperCase().includes("USDT") ? (
         <UsdtLogo />
       ) : (
@@ -257,8 +278,15 @@ function DefaultAssetRow({
         {isLoading ? (
           <ActivityIndicator size="small" color={colors.primary} style={{ marginBottom: 4 }} />
         ) : (
-             <Text style={[s.amount, balance && balance !== "0" && balance !== "—" ? {} : { color: colors.mutedForeground }]}>
-            {balance ?? "—"}
+          <Text style={[
+            s.amount,
+            isError
+              ? { color: colors.destructive }
+              : balance && balance !== "0" && balance !== "—"
+                ? {}
+                : { color: colors.mutedForeground },
+          ]}>
+            {isError ? "Retry" : balance ?? "—"}
           </Text>
         )}
         <Text style={s.sub}>{asset.symbol}</Text>
