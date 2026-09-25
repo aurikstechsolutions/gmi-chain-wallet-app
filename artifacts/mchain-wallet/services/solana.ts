@@ -18,7 +18,7 @@ export const SOLANA_NATIVE_DECIMALS = 9;
 const SOLANA_FALLBACK_RPC_URL = "https://solana-rpc.publicnode.com";
 
 const connection = new Connection(SOLANA_RPC_URL, "confirmed");
-const SOLANA_RPC_ENDPOINTS = [SOLANA_RPC_URL, SOLANA_FALLBACK_RPC_URL];
+export const SOLANA_RPC_ENDPOINTS = [SOLANA_RPC_URL, SOLANA_FALLBACK_RPC_URL] as const;
 
 async function withRpcFallback<T>(operation: (rpcUrl: string) => Promise<T>): Promise<T> {
   let lastError: unknown;

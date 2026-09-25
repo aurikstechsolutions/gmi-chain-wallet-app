@@ -7,6 +7,7 @@ import {
 import { getAssociatedTokenAddress } from "@solana/spl-token";
 import {
   solanaKeypairFromPrivateKey,
+  SOLANA_RPC_ENDPOINTS,
   SOLANA_RPC_URL,
 } from "./solana";
 import { SOLANA_GMI_CONTRACT_ADDRESS } from "./solanaAssets";
@@ -224,6 +225,48 @@ async function describeRaydiumError(error: unknown, connection: Connection): Pro
   return baseMessage;
 }
 
+async function sendRaydiumTransaction(
+  signed: Uint8Array,
+): Promise<{ signature: string; connection: Connection }> {
+  let lastError: unknown;
+  for (const endpoint of SOLANA_RPC_ENDPOINTS) {
+    const connection = new Connection(endpoint, "confirmed");
+    try {
+      const signature = await connection.sendRawTransaction(signed, {
+        skipPreflight: false,
+        preflightCommitment: "confirmed",
+      });
+      return { signature, connection };
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("All configured Solana RPC endpoints rejected the Raydium transaction");
+}
+
+async function confirmRaydiumTransaction(signature: string): Promise<void> {
+  let lastError: unknown;
+  for (const endpoint of SOLANA_RPC_ENDPOINTS) {
+    const connection = new Connection(endpoint, "confirmed");
+    try {
+      const confirmation = await connection.confirmTransaction(signature, "confirmed");
+      if (confirmation.value.err) {
+        throw new Error(`Raydium swap failed to confirm: ${JSON.stringify(confirmation.value.err)}`);
+      }
+      return;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      if (message.startsWith("Raydium swap failed to confirm:")) throw error;
+      lastError = error;
+    }
+  }
+  throw lastError instanceof Error
+    ? lastError
+    : new Error("Could not confirm the Raydium transaction through configured Solana RPC endpoints");
+}
+
 export function snapshotRaydiumQuote(quote: RaydiumSwapQuote): RaydiumSwapQuoteSnapshot {
   return {
     inputMint: quote.inputMint,
@@ -357,7 +400,6 @@ export async function executeRaydiumSwap(
     };
   }
 
-  const connection = new Connection(SOLANA_RPC_URL, "confirmed");
   const signatures: string[] = [];
   options.onProgress?.(copyRaydiumSwapProgress(progress));
   for (const transaction of progress.transactions) {
@@ -373,18 +415,13 @@ export async function executeRaydiumSwap(
       let signature = transaction.signature;
       if (!signature) {
         const signed = signRaydiumTransaction(decodeBase64(transaction.transaction), signer);
-        signature = await connection.sendRawTransaction(signed, {
-          skipPreflight: false,
-          preflightCommitment: "confirmed",
-        });
+        const broadcast = await sendRaydiumTransaction(signed);
+        signature = broadcast.signature;
         transaction.signature = signature;
         options.onProgress?.(copyRaydiumSwapProgress(progress));
       }
 
-      const confirmation = await connection.confirmTransaction(signature, "confirmed");
-      if (confirmation.value.err) {
-        throw new Error(`Raydium swap failed to confirm: ${JSON.stringify(confirmation.value.err)}`);
-      }
+      await confirmRaydiumTransaction(signature);
       transaction.status = "confirmed";
       options.onProgress?.(copyRaydiumSwapProgress(progress));
       signatures.push(signature);
