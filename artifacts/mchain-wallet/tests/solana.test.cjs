@@ -250,6 +250,51 @@ test("fetches and formats all owner's Solana mint accounts with RPC fallback", a
   }
 });
 
+test("falls back to the associated token account when indexed RPC methods are blocked", async () => {
+  const originalFetch = global.fetch;
+  const originalGetAccountInfo = Connection.prototype.getAccountInfo;
+  const rpcAccounts = [];
+  const accountData = Buffer.alloc(165);
+  accountData.writeBigUInt64LE(45_170_853n, 64);
+  global.fetch = async (url) => {
+    if (url.includes("api.mainnet-beta.solana.com")) {
+      throw new Error("primary Solana RPC unavailable");
+    }
+    return {
+      ok: true,
+      json: async () => ({
+        error: { code: -32004, message: "Indexed requests require a personal token" },
+      }),
+    };
+  };
+  Connection.prototype.getAccountInfo = async function (address) {
+    rpcAccounts.push({ endpoint: this.rpcEndpoint, address: address.toBase58() });
+    if (this.rpcEndpoint.includes("api.mainnet-beta.solana.com")) {
+      throw new Error("primary Solana RPC unavailable");
+    }
+    return {
+      ...accountInfo(),
+      data: accountData,
+    };
+  };
+
+  try {
+    assert.equal(
+      await fetchSolanaTokenBalance(
+        SOLANA_GMI_CONTRACT_ADDRESS,
+        SOLANA_WALLET_ADDRESS,
+        6,
+      ),
+      "45.170853",
+    );
+    assert.equal(rpcAccounts.length, 2);
+    assert.match(rpcAccounts[1].endpoint, /solana-rpc\.publicnode\.com/);
+  } finally {
+    global.fetch = originalFetch;
+    Connection.prototype.getAccountInfo = originalGetAccountInfo;
+  }
+});
+
 test("requires native SOL amount plus the estimated network fee", async () => {
   const insufficient = rpc({ getBalance: async () => 1_004_999 });
   await assert.rejects(

@@ -132,21 +132,50 @@ export async function fetchSolanaTokenBalanceRaw(
 ): Promise<bigint> {
   const owner = new PublicKey(ownerAddress);
   const mint = new PublicKey(mintAddress);
-  const accounts = await withRpcFallback((rpcUrl) => solanaRpc<{
+  let accounts: {
     value: Array<{ account: { data?: { parsed?: { info?: { tokenAmount?: { amount?: string } } } } } }>
-  }>(
-    rpcUrl,
-    "getTokenAccountsByOwner",
-    [
-      owner.toBase58(),
-      { mint: mint.toBase58() },
-      { encoding: "jsonParsed", commitment: "confirmed" },
-    ],
-  ));
-  return accounts.value.reduce((total, account) => {
+  };
+  try {
+    accounts = await withRpcFallback((rpcUrl) => solanaRpc(
+      rpcUrl,
+      "getTokenAccountsByOwner",
+      [
+        owner.toBase58(),
+        { mint: mint.toBase58() },
+        { encoding: "jsonParsed", commitment: "confirmed" },
+      ],
+    ));
+  } catch {
+    return fetchAssociatedSolanaTokenBalanceRaw(mint, owner);
+  }
+
+  const total = accounts.value.reduce((balance, account) => {
     const amount = account.account.data?.parsed?.info?.tokenAmount?.amount;
-    return amount === undefined ? total : total + BigInt(amount);
+    return amount === undefined ? balance : balance + BigInt(amount);
   }, 0n);
+  return total === 0n
+    ? fetchAssociatedSolanaTokenBalanceRaw(mint, owner)
+    : total;
+}
+
+async function fetchAssociatedSolanaTokenBalanceRaw(
+  mint: PublicKey,
+  owner: PublicKey,
+): Promise<bigint> {
+  const tokenAccount = await getAssociatedTokenAddress(mint, owner);
+  const accountInfo = await withRpcFallback((rpcUrl) =>
+    new Connection(rpcUrl, "confirmed").getAccountInfo(tokenAccount, "confirmed"),
+  );
+  if (!accountInfo) return 0n;
+  if (accountInfo.data.byteLength < 72) {
+    throw new Error("Solana token account data is incomplete");
+  }
+
+  let amount = 0n;
+  for (let index = 71; index >= 64; index -= 1) {
+    amount = (amount << 8n) | BigInt(accountInfo.data[index]);
+  }
+  return amount;
 }
 
 export async function fetchSolanaTokenBalance(
