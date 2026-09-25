@@ -35,6 +35,7 @@ import {
   executeRaydiumSwap,
   fetchRaydiumGmiToSolQuote,
   fetchRaydiumSolToGmiQuote,
+  hasRaydiumTransactionToResume,
   RaydiumSwapError,
   restoreRaydiumQuote,
   snapshotRaydiumQuote,
@@ -650,7 +651,7 @@ export default function SwapScreen() {
       const confirmedCount = solanaRecovery.progress.transactions.filter(
         (transaction) => transaction.status === "confirmed",
       ).length;
-      if (confirmedCount === 0) {
+      if (!hasRaydiumTransactionToResume(solanaRecovery.progress)) {
         // A failed preflight leaves the original serialized transaction in
         // recovery storage. Its blockhash and simulation context can become
         // stale, so resending it creates an endless failure loop. Keep the
@@ -691,6 +692,19 @@ export default function SwapScreen() {
     }
   }
 
+  async function refreshAfterUnbroadcastSolanaFailure() {
+    if (!activeWallet || !solanaProgress || hasRaydiumTransactionToResume(solanaProgress)) return;
+    try {
+      await clearSolanaRecovery(activeWallet.id);
+      setSolanaProgress(null);
+      setSolanaQuoteOverride(null);
+      setSolanaError("Stale transaction discarded. Review the refreshed quote before retrying.");
+      await solQuoteQuery.refetch();
+    } catch {
+      setSolanaError("The stale transaction could not be cleared. Try again before submitting another swap.");
+    }
+  }
+
   async function submitSolanaSwap() {
     const raydiumQuote = solanaQuoteOverride ?? solQuoteQuery.data;
     if (!activeWallet || !solAddress || !solInputState.raw || !raydiumQuote) return;
@@ -728,12 +742,30 @@ export default function SwapScreen() {
     } catch (error) {
       setSolanaAction("error");
       if (error instanceof RaydiumSwapError) {
-        setSolanaProgress(error.progress);
         const confirmed = error.progress.transactions.filter((transaction) => transaction.status === "confirmed").length;
         const total = error.progress.transactions.length;
         const remaining = total - confirmed;
-        persistSolanaProgress(error.progress, raydiumQuote);
-        setSolanaError(`${error.message} ${confirmed} of ${total} transaction${total === 1 ? "" : "s"} confirmed. Retry will resume with ${remaining} remaining; confirmed transactions will not be sent again.`);
+        const isUnbroadcastFailure = confirmed === 0 && error.progress.transactions.every(
+          (transaction) => transaction.status !== "confirmed" && !transaction.signature,
+        );
+        if (isUnbroadcastFailure) {
+          try {
+            await clearSolanaRecovery(activeWallet.id);
+          } catch {
+            setSolanaProgress(error.progress);
+            persistSolanaProgress(error.progress, raydiumQuote);
+            setSolanaError(`${error.message} No transaction was confirmed, but the saved recovery record could not be cleared. Use “Refresh quote & retry” to discard it.`);
+            return;
+          }
+          setSolanaProgress(null);
+          setSolanaQuoteOverride(null);
+          setSolanaError(`${error.message} No transaction was confirmed. The saved batch was discarded and the quote is being refreshed; review it before retrying.`);
+          void solQuoteQuery.refetch();
+        } else {
+          setSolanaProgress(error.progress);
+          persistSolanaProgress(error.progress, raydiumQuote);
+          setSolanaError(`${error.message} ${confirmed} of ${total} transaction${total === 1 ? "" : "s"} confirmed. Retry will resume with ${remaining} remaining; confirmed transactions will not be sent again.`);
+        }
       } else {
         setSolanaError(error instanceof Error ? error.message : "Solana swap failed. Try again.");
       }
@@ -933,7 +965,9 @@ export default function SwapScreen() {
           <View style={s.recoveryCard}>
             <Text style={s.recoveryTitle}>Interrupted Raydium swap found</Text>
             <Text style={s.recoveryText}>
-              {solanaRecovery.progress.transactions.filter((transaction) => transaction.status === "confirmed").length} of {solanaRecovery.progress.transactions.length} transactions are confirmed for the {solanaRecovery.direction === "sol-to-gmi" ? "SOL → GMI" : "GMI → SOL"} swap. Resume the saved batch or dismiss it before starting a new swap.
+              {hasRaydiumTransactionToResume(solanaRecovery.progress)
+                ? `${solanaRecovery.progress.transactions.filter((transaction) => transaction.status === "confirmed").length} of ${solanaRecovery.progress.transactions.length} transactions are confirmed for the ${solanaRecovery.direction === "sol-to-gmi" ? "SOL → GMI" : "GMI → SOL"} swap. Resume will check any submitted signatures and skip confirmed transactions.`
+                : `No transaction was confirmed for the ${solanaRecovery.direction === "sol-to-gmi" ? "SOL → GMI" : "GMI → SOL"} swap. Discard the stale transaction and request a fresh quote.`}
             </Text>
             <View style={s.recoveryActions}>
               <TouchableOpacity
@@ -944,7 +978,7 @@ export default function SwapScreen() {
                 accessibilityLabel="Resume interrupted Raydium swap"
               >
                 <Text style={[s.recoveryButtonText, s.recoveryButtonTextPrimary]}>
-                  {solanaRecovery.progress.transactions.some((transaction) => transaction.status === "confirmed")
+                  {hasRaydiumTransactionToResume(solanaRecovery.progress)
                     ? "Resume swap"
                     : "Refresh quote & retry"}
                 </Text>
@@ -1030,15 +1064,26 @@ export default function SwapScreen() {
         </View>
         {!solanaQuoteOverride && solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
         {solanaProgress ? <Notice icon="sync-outline" tone="warning" colors={colors}>
-          {solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length === 0
-            ? "The previous Raydium transaction was not confirmed. Resume will discard the stale transaction and request a fresh quote."
+          {!hasRaydiumTransactionToResume(solanaProgress)
+            ? "The previous Raydium transaction was not confirmed. Refresh & retry will discard it and request a fresh quote."
+            : solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length === 0
+              ? "A transaction signature is saved but not confirmed. Resume checks its status without broadcasting it again."
             : `Partial progress saved: ${solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length} of ${solanaProgress.transactions.length} Raydium transactions confirmed. Resume is safe and will skip completed transactions.`}
         </Notice> : null}
         {solanaError ? <Notice icon="alert-circle" tone="error" colors={colors}>{solanaError}</Notice> : null}
         {solanaAction === "success" ? <Notice icon="checkmark-circle" tone="success" colors={colors}>Swap confirmed{solanaTxHash ? ` · ${shortenHash(solanaTxHash)}` : ""}.</Notice> : null}
-        <TouchableOpacity style={[s.primaryButton, solSwapReady && s.primaryButtonReady]} disabled={!solSwapReady} onPress={() => void submitSolanaSwap()} activeOpacity={0.82}>
+        <TouchableOpacity
+          style={[s.primaryButton, solSwapReady && s.primaryButtonReady]}
+          disabled={!solSwapReady}
+          onPress={() => void (
+            solanaProgress && !hasRaydiumTransactionToResume(solanaProgress)
+              ? refreshAfterUnbroadcastSolanaFailure()
+              : submitSolanaSwap()
+          )}
+          activeOpacity={0.82}
+        >
           <Text style={[s.primaryButtonText, solSwapReady && s.primaryButtonTextReady]}>
-            {solanaRecoveryLoading ? "Checking interrupted swaps…" : solanaRecovery ? "Resume or dismiss the saved swap" : !solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : !solanaQuoteOverride && solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Confirming on Solana…" : solanaProgress ? "Resume swap" : "Review & swap"}
+            {solanaRecoveryLoading ? "Checking interrupted swaps…" : solanaRecovery ? "Resume or dismiss the saved swap" : !solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : !solanaQuoteOverride && solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Confirming on Solana…" : solanaProgress ? hasRaydiumTransactionToResume(solanaProgress) ? "Resume swap" : "Refresh quote & retry" : "Review & swap"}
           </Text>
         </TouchableOpacity>
         <Text style={s.helperText}>Your wallet signs locally. Review the Raydium route and minimum received amount before signing.</Text>

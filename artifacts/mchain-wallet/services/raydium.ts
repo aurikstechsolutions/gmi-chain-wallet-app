@@ -8,7 +8,6 @@ import { getAssociatedTokenAddress } from "@solana/spl-token";
 import {
   solanaKeypairFromPrivateKey,
   SOLANA_RPC_ENDPOINTS,
-  SOLANA_RPC_URL,
 } from "./solana";
 import { SOLANA_GMI_CONTRACT_ADDRESS } from "./solanaAssets";
 
@@ -145,6 +144,12 @@ export type RaydiumSwapProgress = {
   transactions: RaydiumSwapTransactionProgress[];
 };
 
+export function hasRaydiumTransactionToResume(progress: RaydiumSwapProgress): boolean {
+  return progress.transactions.some(
+    (transaction) => transaction.status === "confirmed" || !!transaction.signature,
+  );
+}
+
 export type RaydiumSwapQuoteSnapshot = {
   inputMint: string;
   outputMint: string;
@@ -202,16 +207,20 @@ function copyRaydiumSwapProgress(progress: RaydiumSwapProgress): RaydiumSwapProg
   };
 }
 
-async function describeRaydiumError(error: unknown, connection: Connection): Promise<string> {
+type RaydiumRpcError = Error & {
+  getLogs?: () => Promise<string[] | null>;
+};
+
+async function describeRaydiumError(error: unknown): Promise<string> {
   const candidate = error as {
     message?: string;
-    getLogs?: (connection: Connection) => Promise<string[] | null>;
+    getLogs?: () => Promise<string[] | null>;
   };
   const baseMessage = candidate?.message || "Raydium swap transaction failed";
   let logs: string[] | null = null;
   if (typeof candidate?.getLogs === "function") {
     try {
-      logs = await candidate.getLogs(connection);
+      logs = await candidate.getLogs();
     } catch {
       logs = null;
     }
@@ -229,6 +238,8 @@ async function sendRaydiumTransaction(
   signed: Uint8Array,
 ): Promise<{ signature: string; connection: Connection }> {
   let lastError: unknown;
+  let lastConnection: Connection | undefined;
+  const failures: string[] = [];
   for (const endpoint of SOLANA_RPC_ENDPOINTS) {
     const connection = new Connection(endpoint, "confirmed");
     try {
@@ -239,11 +250,19 @@ async function sendRaydiumTransaction(
       return { signature, connection };
     } catch (error) {
       lastError = error;
+      lastConnection = connection;
+      const message = error instanceof Error ? error.message : String(error);
+      failures.push(`${new URL(endpoint).hostname}: ${message}`);
     }
   }
-  throw lastError instanceof Error
-    ? lastError
-    : new Error("All configured Solana RPC endpoints rejected the Raydium transaction");
+  const finalError = new Error(
+    `All configured Solana RPC endpoints rejected the Raydium transaction. ${failures.join(" | ")}`,
+  ) as RaydiumRpcError;
+  const originalGetLogs = (lastError as { getLogs?: (connection: Connection) => Promise<string[] | null> } | null)?.getLogs;
+  if (typeof originalGetLogs === "function" && lastConnection) {
+    finalError.getLogs = () => originalGetLogs.call(lastError, lastConnection);
+  }
+  throw finalError;
 }
 
 async function confirmRaydiumTransaction(signature: string): Promise<void> {
@@ -426,7 +445,7 @@ export async function executeRaydiumSwap(
       options.onProgress?.(copyRaydiumSwapProgress(progress));
       signatures.push(signature);
     } catch (error) {
-      const message = await describeRaydiumError(error, connection);
+      const message = await describeRaydiumError(error);
       throw new RaydiumSwapError(message, copyRaydiumSwapProgress(progress));
     }
   }

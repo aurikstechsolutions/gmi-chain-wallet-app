@@ -28,6 +28,7 @@ const {
 } = require("../services/solanaAssets.ts");
 const {
   executeRaydiumSwap,
+  hasRaydiumTransactionToResume,
   parseRaydiumSwapRecovery,
   RaydiumSwapError,
   restoreRaydiumQuote,
@@ -169,7 +170,9 @@ async function withMockedRaydiumSwap(data, callback) {
   Connection.prototype.sendRawTransaction = async (raw) => {
     sent.push(raw);
     sendCount += 1;
-    if (sendCount === 2) throw new Error("RPC disconnected after the first broadcast");
+    if (sendCount === 2 || sendCount === 3) {
+      throw new Error("RPC disconnected after the first broadcast");
+    }
     return `test-signature-${sendCount}`;
   };
   Connection.prototype.confirmTransaction = async () => ({
@@ -347,6 +350,58 @@ test("executes every transaction in a multi-transaction Raydium swap", async () 
   assert.equal(sent.length, 2);
 });
 
+test("falls back to the secondary Solana RPC when the primary denies the swap broadcast", async () => {
+  const originalFetch = global.fetch;
+  const originalSendRawTransaction = Connection.prototype.sendRawTransaction;
+  const originalConfirmTransaction = Connection.prototype.confirmTransaction;
+  const attemptedEndpoints = [];
+  global.fetch = async () => ({
+    ok: true,
+    json: async () => ({ success: true, data: [raydiumTransaction()] }),
+  });
+  Connection.prototype.sendRawTransaction = async function () {
+    attemptedEndpoints.push(this.rpcEndpoint);
+    if (this.rpcEndpoint.includes("api.mainnet-beta.solana.com")) {
+      throw new Error('403: {"jsonrpc":"2.0","error":{"code":403,"message":"Access forbidden"}}');
+    }
+    return "fallback-signature";
+  };
+  Connection.prototype.confirmTransaction = async () => ({
+    context: { slot: 1 },
+    value: { err: null },
+  });
+
+  try {
+    const result = await executeRaydiumSwap(
+      PRIVATE_KEY_HEX,
+      SOLANA_WALLET_ADDRESS,
+      raydiumQuote(),
+    );
+    assert.deepEqual(result.signatures, ["fallback-signature"]);
+    assert.equal(attemptedEndpoints.length, 2);
+    assert.match(attemptedEndpoints[1], /solana-rpc\.publicnode\.com/);
+  } finally {
+    global.fetch = originalFetch;
+    Connection.prototype.sendRawTransaction = originalSendRawTransaction;
+    Connection.prototype.confirmTransaction = originalConfirmTransaction;
+  }
+});
+
+test("only retries saved Raydium transactions that already have a signature or confirmation", () => {
+  assert.equal(hasRaydiumTransactionToResume({
+    poolId: "test-pool",
+    transactions: [{ transaction: "unsigned", status: "pending" }],
+  }), false);
+  assert.equal(hasRaydiumTransactionToResume({
+    poolId: "test-pool",
+    transactions: [{ transaction: "signed", signature: "known-signature", status: "pending" }],
+  }), true);
+  assert.equal(hasRaydiumTransactionToResume({
+    poolId: "test-pool",
+    transactions: [{ transaction: "confirmed", signature: "known-signature", status: "confirmed" }],
+  }), true);
+});
+
 test("resumes a partially broadcast swap without resending confirmed transactions", async () => {
   await withMockedRaydiumSwap(
     [raydiumTransaction(), raydiumTransaction()],
@@ -369,7 +424,7 @@ test("resumes a partially broadcast swap without resending confirmed transaction
           return true;
         },
       );
-      assert.equal(sent.length, 2);
+      assert.equal(sent.length, 3);
 
       const result = await executeRaydiumSwap(
         PRIVATE_KEY_HEX,
@@ -378,10 +433,10 @@ test("resumes a partially broadcast swap without resending confirmed transaction
         { resume: progress },
       );
       assert.deepEqual(result, {
-        signatures: ["test-signature-1", "test-signature-3"],
+        signatures: ["test-signature-1", "test-signature-4"],
         poolId: "test-pool",
       });
-      assert.equal(sent.length, 3);
+      assert.equal(sent.length, 4);
     },
   );
 });
