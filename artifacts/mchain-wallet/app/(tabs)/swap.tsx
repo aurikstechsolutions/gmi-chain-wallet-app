@@ -1,5 +1,6 @@
 import { Icon } from "@/components/Icon";
 import { TradeSelectorModal, type TradeSelectorOption } from "@/components/TradeSelectorModal";
+import { usePinContext } from "@/context/PinContext";
 import { useWallet } from "@/context/WalletContext";
 import { useColors } from "@/hooks/useColors";
 import { api, type AmmPublicConfig, type AmmTokenConfig, type BridgeChain, type BridgePublicConfig, type BridgeTransferStatus } from "@/services/api";
@@ -46,9 +47,15 @@ import {
 import {
   deletePersistentItemAsync,
   getPersistentItemAsync,
+  getPersistentItemStrictAsync,
   setPersistentItemAsync,
 } from "@/services/secureStore";
 import { createRaydiumSwapRecoveryStore } from "@/services/raydiumRecovery";
+import {
+  createSwapHistoryStore,
+  SWAP_HISTORY_LIMIT,
+  type SwapHistoryEntry,
+} from "@/services/swapHistory";
 import { SOLANA_GMI_CONTRACT_ADDRESS } from "@/services/solanaAssets";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -240,6 +247,17 @@ function stylesFor(colors: ReturnType<typeof useColors>) {
     recoveryButtonPrimary: { backgroundColor: colors.primary, borderColor: colors.primary },
     recoveryButtonText: { fontSize: 12, fontFamily: "Inter_700Bold", color: colors.foreground },
     recoveryButtonTextPrimary: { color: colors.primaryForeground },
+    historyCard: { marginTop: 14, padding: 14, backgroundColor: colors.card, borderWidth: 1, borderColor: colors.border, borderRadius: colors.radius + 2 },
+    historyHeader: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginBottom: 4 },
+    historySubtitle: { fontSize: 11, lineHeight: 16, fontFamily: "Inter_400Regular", color: colors.mutedForeground, marginBottom: 8 },
+    historyEmpty: { fontSize: 12, lineHeight: 18, fontFamily: "Inter_400Regular", color: colors.mutedForeground, paddingVertical: 12 },
+    historyEntry: { paddingVertical: 11, borderTopWidth: 1, borderTopColor: colors.border },
+    historyEntryTop: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", gap: 10 },
+    historyPair: { flex: 1, fontSize: 12, fontFamily: "Inter_600SemiBold", color: colors.foreground },
+    historyDate: { fontSize: 10, fontFamily: "Inter_400Regular", color: colors.mutedForeground },
+    historyMeta: { flexDirection: "row", alignItems: "center", justifyContent: "space-between", marginTop: 5 },
+    historyNetwork: { fontSize: 10, fontFamily: "Inter_500Medium", color: colors.mutedForeground },
+    historyHash: { fontSize: 10, fontFamily: "Inter_500Medium", color: colors.primary },
     amountBox: { borderRadius: colors.radius - 2, borderWidth: 1, padding: 14 },
     amountHeader: { flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: 8 },
     fieldEyebrow: { fontSize: 11, fontFamily: "Inter_600SemiBold", letterSpacing: 1, textTransform: "uppercase" },
@@ -315,6 +333,7 @@ export default function SwapScreen() {
   const insets = useSafeAreaInsets();
   const queryClient = useQueryClient();
   const { activeWallet, solAddress, getPrivateKey } = useWallet();
+  const { requestPin } = usePinContext();
   const { mode: requestedMode } = useLocalSearchParams<{ mode?: string }>();
   const [mode, setMode] = useState<TradeMode>("swap");
   const [liquidityMode, setLiquidityMode] = useState<LiquidityMode>("add");
@@ -339,6 +358,12 @@ export default function SwapScreen() {
   const [solanaRecovery, setSolanaRecovery] = useState<RaydiumSwapRecovery | null>(null);
   const [solanaRecoveryLoading, setSolanaRecoveryLoading] = useState(false);
   const [solanaQuoteOverride, setSolanaQuoteOverride] = useState<RaydiumSwapQuote | null>(null);
+  const [swapPinPending, setSwapPinPending] = useState(false);
+  const swapPinPendingRef = React.useRef(false);
+  const [swapHistory, setSwapHistory] = useState<SwapHistoryEntry[]>([]);
+  const [swapHistoryWalletId, setSwapHistoryWalletId] = useState<string | null>(null);
+  const [swapHistoryLoading, setSwapHistoryLoading] = useState(false);
+  const [swapHistoryError, setSwapHistoryError] = useState<string | null>(null);
   const recoveryWriteRef = React.useRef(Promise.resolve());
   const raydiumRecoveryStore = React.useMemo(
     () => createRaydiumSwapRecoveryStore({
@@ -348,6 +373,96 @@ export default function SwapScreen() {
     }),
     [],
   );
+  const swapHistoryStore = React.useMemo(
+    () => createSwapHistoryStore({
+      get: getPersistentItemStrictAsync,
+      set: setPersistentItemAsync,
+      delete: deletePersistentItemAsync,
+    }),
+    [],
+  );
+
+  React.useEffect(() => {
+    let cancelled = false;
+    setSwapHistory([]);
+    setSwapHistoryWalletId(activeWallet?.id ?? null);
+    setSwapHistoryError(null);
+    setSwapHistoryLoading(!!activeWallet);
+    if (!activeWallet) return;
+
+    void swapHistoryStore.load(activeWallet.id)
+      .then((entries) => {
+        if (!cancelled) {
+          setSwapHistory((current) => {
+            const merged = new Map(entries.map((entry) => [entry.id, entry]));
+            for (const entry of current) merged.set(entry.id, entry);
+            return [...merged.values()]
+              .sort((a, b) => Date.parse(b.completedAt) - Date.parse(a.completedAt))
+              .slice(0, SWAP_HISTORY_LIMIT);
+          });
+        }
+      })
+      .catch(() => {
+        if (!cancelled) setSwapHistoryError("Swap history could not be loaded.");
+      })
+      .finally(() => {
+        if (!cancelled) setSwapHistoryLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [activeWallet?.id, swapHistoryStore]);
+
+  function finishSwapPinPrompt() {
+    swapPinPendingRef.current = false;
+    setSwapPinPending(false);
+  }
+
+  async function authorizeSwap(network: "gmi" | "solana", onAuthorized: () => void) {
+    if (swapPinPendingRef.current) return;
+    swapPinPendingRef.current = true;
+    setSwapPinPending(true);
+    const showPinRequired = () => {
+      const message = "Set up a wallet PIN in Settings before swapping.";
+      if (network === "gmi") setAmmError(message);
+      else setSolanaError(message);
+      finishSwapPinPrompt();
+    };
+
+    try {
+      await requestPin({
+        title: "Confirm Swap",
+        subtitle: "Enter your PIN to authorize and sign this swap.",
+        requirePin: true,
+        onSuccess: () => {
+          finishSwapPinPrompt();
+          onAuthorized();
+        },
+        onCancel: finishSwapPinPrompt,
+        onPinUnavailable: showPinRequired,
+      });
+    } catch (error) {
+      finishSwapPinPrompt();
+      const message = error instanceof Error ? error.message : "PIN authorization failed. Try again.";
+      if (network === "gmi") setAmmError(message);
+      else setSolanaError(message);
+    }
+  }
+
+  async function recordSwapHistory(walletId: string, entry: SwapHistoryEntry) {
+    try {
+      const entries = await swapHistoryStore.add(walletId, entry);
+      if (activeWallet?.id === walletId) {
+        setSwapHistoryWalletId(walletId);
+        setSwapHistory(entries);
+        setSwapHistoryError(null);
+      }
+    } catch {
+      if (activeWallet?.id === walletId) {
+        setSwapHistoryError("Swap confirmed, but it could not be saved to history.");
+      }
+    }
+  }
   const [bridgeSource, setBridgeSource] = useState<BridgeChain>("gmi");
   const [destinationAddress, setDestinationAddress] = useState("");
   const [bridgeStatus, setBridgeStatus] = useState<BridgeTransferStatus | null>(null);
@@ -614,6 +729,17 @@ export default function SwapScreen() {
       const hash = await sendAmmTransaction(ammConfig.routerAddress!, tx.data, tx.valueWei);
       setAmmTxHash(hash);
       setAmmAction("success");
+      await recordSwapHistory(activeWallet.id, {
+        id: `gmi:${hash}`,
+        network: "gmi",
+        walletAddress: activeWallet.ethAddress,
+        fromSymbol: fromToken.symbol,
+        toSymbol: toToken.symbol,
+        amountIn: formatAmmUnits(amountIn, fromToken.decimals),
+        amountOut: formatAmmUnits(quote.amountOut, toToken.decimals),
+        txHash: hash,
+        completedAt: new Date().toISOString(),
+      });
       await queryClient.invalidateQueries({ queryKey: ["ammSnapshot"] });
     } catch (error) {
       setAmmAction("error");
@@ -730,8 +856,23 @@ export default function SwapScreen() {
           },
         },
       );
-      setSolanaTxHash(result.signatures[result.signatures.length - 1] ?? null);
+      const txHash = result.signatures[result.signatures.length - 1] ?? null;
+      setSolanaTxHash(txHash);
       setSolanaAction("success");
+      if (txHash) {
+        const outputDecimals = solanaSwapDirection === "sol-to-gmi" ? 6 : 9;
+        await recordSwapHistory(activeWallet.id, {
+          id: `solana:${txHash}`,
+          network: "solana",
+          walletAddress: solAddress,
+          fromSymbol: solanaInputSymbol,
+          toSymbol: solanaOutputSymbol,
+          amountIn: formatSolanaAmount(raydiumQuote.inputAmount, solanaInputDecimals),
+          amountOut: formatSolanaAmount(raydiumQuote.outputAmount, outputDecimals),
+          txHash,
+          completedAt: new Date().toISOString(),
+        });
+      }
       await clearSolanaRecovery(activeWallet.id);
       setSolanaRecovery(null);
       setSolanaProgress(null);
@@ -948,7 +1089,7 @@ export default function SwapScreen() {
     const validSolSlippage = Number.isFinite(Number(slippage)) && Number(slippage) >= 0 && Number(slippage) <= 20;
     const solSwapReady = !!activeWallet && !!solAddress && !!solInputState.raw && !solInputState.error
       && !!raydiumQuote && (solanaQuoteOverride !== null || !solQuoteQuery.isFetching)
-      && validSolSlippage && !solActionBusy && !solanaRecoveryLoading && !solanaRecovery;
+      && validSolSlippage && !solActionBusy && !swapPinPending && !solanaRecoveryLoading && !solanaRecovery;
     const rate = raydiumQuote && raydiumQuote.inputAmount > 0n
       ? (Number(raydiumQuote.outputAmount) / (10 ** outputDecimals)) / (Number(raydiumQuote.inputAmount) / (10 ** solanaInputDecimals))
       : 0;
@@ -1063,13 +1204,7 @@ export default function SwapScreen() {
           <View style={[s.detailRow, s.detailRowLast]}><Text style={s.detailLabel}>Slippage tolerance</Text><View style={{ flexDirection: "row", alignItems: "center" }}><TextInput value={slippage} editable={!solanaProgress} onChangeText={(value) => { setSlippage(value); setSolanaAction("idle"); }} keyboardType="decimal-pad" style={[styles.slippageInput, { color: colors.foreground, borderColor: colors.border }]} /><Text style={s.detailValue}>%</Text></View></View>
         </View>
         {!solanaQuoteOverride && solQuoteQuery.isFetching && solAmount.length > 0 ? <Notice icon="sync-outline" tone="muted" colors={colors}>Refreshing the Raydium quote…</Notice> : null}
-        {solanaProgress ? <Notice icon="sync-outline" tone="warning" colors={colors}>
-          {!hasRaydiumTransactionToResume(solanaProgress)
-            ? "The previous Raydium transaction was not confirmed. Refresh & retry will discard it and request a fresh quote."
-            : solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length === 0
-              ? "A transaction signature is saved but not confirmed. Resume checks its status without broadcasting it again."
-            : `Partial progress saved: ${solanaProgress.transactions.filter((transaction) => transaction.status === "confirmed").length} of ${solanaProgress.transactions.length} Raydium transactions confirmed. Resume is safe and will skip completed transactions.`}
-        </Notice> : null}
+        {solActionBusy ? <Notice icon="sync-outline" tone="muted" colors={colors}>Processing</Notice> : null}
         {solanaError ? <Notice icon="alert-circle" tone="error" colors={colors}>{solanaError}</Notice> : null}
         {solanaAction === "success" ? <Notice icon="checkmark-circle" tone="success" colors={colors}>Swap confirmed{solanaTxHash ? ` · ${shortenHash(solanaTxHash)}` : ""}.</Notice> : null}
         <TouchableOpacity
@@ -1078,12 +1213,12 @@ export default function SwapScreen() {
           onPress={() => void (
             solanaProgress && !hasRaydiumTransactionToResume(solanaProgress)
               ? refreshAfterUnbroadcastSolanaFailure()
-              : submitSolanaSwap()
+              : authorizeSwap("solana", () => { void submitSolanaSwap(); })
           )}
           activeOpacity={0.82}
         >
           <Text style={[s.primaryButtonText, solSwapReady && s.primaryButtonTextReady]}>
-            {solanaRecoveryLoading ? "Checking interrupted swaps…" : solanaRecovery ? "Resume or dismiss the saved swap" : !solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : !solanaQuoteOverride && solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Confirming on Solana…" : solanaProgress ? hasRaydiumTransactionToResume(solanaProgress) ? "Resume swap" : "Refresh quote & retry" : "Review & swap"}
+            {solanaRecoveryLoading ? "Checking interrupted swaps…" : solanaRecovery ? "Resume or dismiss the saved swap" : !solAmount ? `Enter ${solanaInputSymbol} amount` : solInputState.error ? solInputState.error : !solanaQuoteOverride && solQuoteQuery.isError ? "Quote unavailable" : solActionBusy ? "Processing…" : solanaProgress ? hasRaydiumTransactionToResume(solanaProgress) ? "Resume swap" : "Refresh quote & retry" : swapPinPending ? "Checking PIN…" : "Review & swap"}
           </Text>
         </TouchableOpacity>
         <Text style={s.helperText}>Your wallet signs locally. Review the Raydium route and minimum received amount before signing.</Text>
@@ -1110,11 +1245,59 @@ export default function SwapScreen() {
 
   const ammState = renderAmmState();
   const actionBusy = ["approving", "signing", "pending"].includes(ammAction);
-  const swapReady = !!activeWallet && !!ammConfig?.enabled && !!snapshot && !!quote && !quoteStale && !quoteState.error && !actionBusy;
+  const swapReady = !!activeWallet && !!ammConfig?.enabled && !!snapshot && !!quote && !quoteStale && !quoteState.error && !actionBusy && !swapPinPending;
   const liquidityReady = !!activeWallet && !!ammConfig?.enabled && !!snapshot && !actionBusy;
   const validSlippage = Number.isFinite(slippageBps) && slippageBps >= 0 && slippageBps <= 2_000;
   const addLiquidityReady = liquidityReady && validSlippage && !!lpGmiAmount && !!lpTokenAmount;
   const removeLiquidityReady = liquidityReady && validSlippage && !!removeAmount && !!snapshot && snapshot.totalSupply > 0n;
+
+  function renderSwapHistory() {
+    if (!activeWallet) return null;
+    const isCurrentWallet = swapHistoryWalletId === activeWallet.id;
+    const entries = isCurrentWallet ? swapHistory : [];
+    const loading = !isCurrentWallet || swapHistoryLoading;
+    const historyError = isCurrentWallet ? swapHistoryError : null;
+
+    return (
+      <View style={s.historyCard}>
+        <View style={s.historyHeader}>
+          <Text style={s.sectionTitle}>Recent swaps</Text>
+          <Icon name="time-outline" size={17} color={colors.mutedForeground} />
+        </View>
+        <Text style={s.historySubtitle}>Confirmed swaps from this wallet.</Text>
+        {loading ? (
+          <Text style={s.historyEmpty}>Loading swap history…</Text>
+        ) : historyError ? (
+          <Notice icon="alert-circle" tone="error" colors={colors}>{historyError}</Notice>
+        ) : entries.length === 0 ? (
+          <Text style={s.historyEmpty}>Completed swaps will appear here.</Text>
+        ) : entries.map((entry) => (
+          <View key={entry.id} style={s.historyEntry}>
+            <View style={s.historyEntryTop}>
+              <Text style={s.historyPair} numberOfLines={1}>
+                {entry.amountIn} {entry.fromSymbol} → {entry.amountOut} {entry.toSymbol}
+              </Text>
+              <Text style={s.historyDate}>
+                {new Date(entry.completedAt).toLocaleString(undefined, {
+                  month: "short",
+                  day: "numeric",
+                  hour: "numeric",
+                  minute: "2-digit",
+                })}
+              </Text>
+            </View>
+            <View style={s.historyMeta}>
+              <Text style={s.historyNetwork}>{entry.network === "gmi" ? "GMI Chain" : "Solana"}</Text>
+              <Text style={s.historyHash}>{shortenHash(entry.txHash)}</Text>
+            </View>
+          </View>
+        ))}
+        {isCurrentWallet && swapHistoryError && entries.length > 0 ? (
+          <Notice icon="alert-circle" tone="error" colors={colors}>{swapHistoryError}</Notice>
+        ) : null}
+      </View>
+    );
+  }
 
   return (
     <KeyboardAvoidingView style={s.container} behavior={Platform.OS === "ios" ? "padding" : undefined}>
@@ -1188,7 +1371,7 @@ export default function SwapScreen() {
                     {quoteStale ? <Notice icon="clock" tone="warning" colors={colors}>Quote expired after one minute. Refresh the pool before signing.</Notice> : null}
                     {ammError ? <Notice icon="alert-circle" tone="error" colors={colors}>{ammError}</Notice> : null}
                     {ammAction === "success" ? <Notice icon="checkmark-circle" tone="success" colors={colors}>Transaction confirmed{ammTxHash ? ` · ${shortenHash(ammTxHash)}` : ""}. Balances will refresh shortly.</Notice> : null}
-                    <TouchableOpacity style={[s.primaryButton, swapReady && s.primaryButtonReady]} disabled={!swapReady} onPress={() => void submitSwap()} activeOpacity={0.82}><Text style={[s.primaryButtonText, swapReady && s.primaryButtonTextReady]}>{!activeWallet ? "Connect a wallet" : !fromTokenId || !toTokenId ? "Select both assets" : actionBusy ? ammAction === "approving" ? "Approve wUSDT…" : ammAction === "pending" ? "Confirming on GMI…" : "Preparing transaction…" : !swapAmount ? "Enter an amount" : quoteState.error ? "Quote unavailable" : quoteStale ? "Refresh quote" : "Review & swap"}</Text></TouchableOpacity>
+                    <TouchableOpacity style={[s.primaryButton, swapReady && s.primaryButtonReady]} disabled={!swapReady} onPress={() => void authorizeSwap("gmi", () => { void submitSwap(); })} activeOpacity={0.82}><Text style={[s.primaryButtonText, swapReady && s.primaryButtonTextReady]}>{!activeWallet ? "Connect a wallet" : !fromTokenId || !toTokenId ? "Select both assets" : actionBusy ? ammAction === "approving" ? "Approve wUSDT…" : ammAction === "pending" ? "Confirming on GMI…" : "Preparing transaction…" : swapPinPending ? "Checking PIN…" : !swapAmount ? "Enter an amount" : quoteState.error ? "Quote unavailable" : quoteStale ? "Refresh quote" : "Review & swap"}</Text></TouchableOpacity>
                     <Text style={s.helperText}>Your wallet signs locally. The AMM never takes custody of your funds.</Text>
                   </>
                 ) : (
@@ -1210,6 +1393,7 @@ export default function SwapScreen() {
                 )}
               </View>
             )}
+            {renderSwapHistory()}
           </>
         ) : (
           <View style={s.formCard}>

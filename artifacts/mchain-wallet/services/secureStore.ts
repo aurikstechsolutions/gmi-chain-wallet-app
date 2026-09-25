@@ -50,6 +50,10 @@ export async function getPersistentItemAsync(key: string): Promise<string | null
   }
 }
 
+export async function getPersistentItemStrictAsync(key: string): Promise<string | null> {
+  return AsyncStorage.getItem(key);
+}
+
 export async function setPersistentItemAsync(key: string, value: string): Promise<void> {
   await AsyncStorage.setItem(key, value);
 }

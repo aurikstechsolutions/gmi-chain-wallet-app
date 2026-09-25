@@ -40,6 +40,11 @@ const {
   createRaydiumSwapRecoveryStore,
   raydiumSwapRecoveryKey,
 } = require("../services/raydiumRecovery.ts");
+const {
+  createSwapHistoryStore,
+  swapHistoryKey,
+  SWAP_HISTORY_LIMIT,
+} = require("../services/swapHistory.ts");
 
 const PRIVATE_KEY_HEX = "01".repeat(32);
 const RECIPIENT = Keypair.fromSeed(new Uint8Array(32).fill(2)).publicKey;
@@ -621,6 +626,120 @@ test("restores recovery across remounts and isolates it when switching wallets",
   // Explicit dismissal clears the other wallet's saved batch as well.
   await remountedScreen.clear(walletA.id);
   assert.equal(await storage.get(raydiumSwapRecoveryKey(walletA.id)), null);
+});
+
+test("persists recent swap history per wallet, orders newest first, and deduplicates confirmations", async () => {
+  const values = new Map();
+  const storage = {
+    get: async (key) => values.get(key) ?? null,
+    set: async (key, value) => { values.set(key, value); },
+    delete: async (key) => { values.delete(key); },
+  };
+  const store = createSwapHistoryStore(storage);
+  const baseEntry = {
+    network: "solana",
+    walletAddress: SOLANA_WALLET_ADDRESS,
+    fromSymbol: "SOL",
+    toSymbol: "GMI",
+    amountIn: "0.25",
+    amountOut: "12.5",
+    completedAt: "2026-09-11T00:00:00.000Z",
+  };
+
+  await store.add("wallet-a", { ...baseEntry, id: "solana:older", txHash: "older" });
+  await store.add("wallet-a", {
+    ...baseEntry,
+    id: "gmi:newer",
+    network: "gmi",
+    txHash: "newer",
+    completedAt: "2026-09-12T00:00:00.000Z",
+  });
+  const updated = await store.add("wallet-a", {
+    ...baseEntry,
+    id: "gmi:newer",
+    network: "gmi",
+    txHash: "newer",
+    amountOut: "13",
+    completedAt: "2026-09-12T00:00:00.000Z",
+  });
+
+  assert.equal(updated.length, 2);
+  assert.equal(updated[0].id, "gmi:newer");
+  assert.equal(updated[0].amountOut, "13");
+  assert.deepEqual(await createSwapHistoryStore(storage).load("wallet-a"), updated);
+  assert.deepEqual(await store.load("wallet-b"), []);
+  assert.ok(values.has(swapHistoryKey("wallet-a")));
+  assert.equal(values.has(swapHistoryKey("wallet-b")), false);
+});
+
+test("serializes concurrent swap-history writes without losing either swap", async () => {
+  const values = new Map();
+  const storage = {
+    get: async (key) => values.get(key) ?? null,
+    set: async (key, value) => {
+      await new Promise((resolve) => setTimeout(resolve, 2));
+      values.set(key, value);
+    },
+    delete: async (key) => { values.delete(key); },
+  };
+  const store = createSwapHistoryStore(storage);
+  const entry = (id, minute) => ({
+    id,
+    network: "gmi",
+    walletAddress: "0xwallet",
+    fromSymbol: "GMI",
+    toSymbol: "wUSDT",
+    amountIn: "1",
+    amountOut: "2",
+    txHash: id,
+    completedAt: new Date(Date.UTC(2026, 0, 1, 0, minute)).toISOString(),
+  });
+
+  await Promise.all([
+    store.add("wallet-a", entry("swap-a", 1)),
+    store.add("wallet-a", entry("swap-b", 2)),
+  ]);
+  assert.deepEqual(
+    (await store.load("wallet-a")).map((swap) => swap.id),
+    ["swap-b", "swap-a"],
+  );
+});
+
+test("caps swap history and removes malformed stored records", async () => {
+  const values = new Map();
+  const storage = {
+    get: async (key) => values.get(key) ?? null,
+    set: async (key, value) => { values.set(key, value); },
+    delete: async (key) => { values.delete(key); },
+  };
+  const store = createSwapHistoryStore(storage);
+  for (let index = 0; index < SWAP_HISTORY_LIMIT + 3; index += 1) {
+    await store.add("wallet-a", {
+      id: `gmi:${index}`,
+      network: "gmi",
+      walletAddress: "0xwallet",
+      fromSymbol: "GMI",
+      toSymbol: "wUSDT",
+      amountIn: String(index + 1),
+      amountOut: "2",
+      txHash: `hash-${index}`,
+      completedAt: new Date(Date.UTC(2026, 0, 1, 0, index)).toISOString(),
+    });
+  }
+  assert.equal((await store.load("wallet-a")).length, SWAP_HISTORY_LIMIT);
+
+  values.set(swapHistoryKey("broken-wallet"), "{not-json");
+  assert.deepEqual(await store.load("broken-wallet"), []);
+  assert.equal(values.has(swapHistoryKey("broken-wallet")), false);
+});
+
+test("propagates swap-history storage read failures instead of displaying an empty history", async () => {
+  const store = createSwapHistoryStore({
+    get: async () => { throw new Error("storage unavailable"); },
+    set: async () => {},
+    delete: async () => {},
+  });
+  await assert.rejects(store.load("wallet-a"), /storage unavailable/);
 });
 
 test("reports a clear error when Raydium returns no transactions", async () => {

@@ -12,8 +12,10 @@ import { hasPin } from "@/services/pin";
 interface PinRequest {
   title: string;
   subtitle?: string;
+  requirePin?: boolean;
   onSuccess: () => void;
   onCancel?: () => void;
+  onPinUnavailable?: () => void;
 }
 
 interface PinContextType {
@@ -78,6 +80,10 @@ export function PinProvider({ children }: { children: React.ReactNode }) {
   const requestPin = useCallback(async (opts: PinRequest) => {
     const exists = await hasPin();
     if (!exists) {
+      if (opts.requirePin) {
+        opts.onPinUnavailable?.();
+        return;
+      }
       opts.onSuccess();
       return;
     }
